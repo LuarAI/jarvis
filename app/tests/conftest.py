@@ -119,6 +119,10 @@ def _clean_overlay(ov):
         pass
     # Multi-chat baseline: close every chat a prior test opened, back to just chat 1.
     try:
+        ov._hide_chat_list()            # a test that opened the ☰ panel must not leak it
+    except Exception:
+        pass
+    try:
         while len(ov._views) > 1:
             ov.switch_chat(ov._views[-1])
             ov.close_chat()

@@ -18,9 +18,11 @@ class FakeRecorder:
     def __init__(self):
         self.started = False
         self.stopped = False
+        self.peak = 0.0
 
-    def start(self):
+    def start(self, device_name=None):
         self.started = True
+        self.device_name = device_name
 
     def elapsed(self):
         return 3.0

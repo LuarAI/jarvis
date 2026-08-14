@@ -222,6 +222,10 @@ class ChatView:
         self.unread = False             # a background reply finished here since last viewed
         self.first_prompt = ""          # first user message (menu snippet + resume record name)
         self.draft = ""                 # entry text parked while another chat is active
+        self.follow = True              # auto-scroll follows new content; goes False the moment
+                                        # the user scrolls up, True again when they return to the
+                                        # bottom — content changes NEVER flip it (that was the
+                                        # "jumps to the bottom while I read" bug)
         self.last_zoom = None           # zoom the embedded canvases were last rendered at
         self.worker = worker
         self.ui_q = ui_q
@@ -336,11 +340,13 @@ class Overlay:
                                           # clipped collapsed window; None → plain orb sprite/ellipse
         self._task_done_badge = False     # show a "stage complete" badge on the collapsed orb after
                                           # a reply finishes while collapsed; cleared on expand/new turn
-        # Voice input (🎤): the in-flight Recorder while recording, else None; _voice_busy
+        # Voice input (🎙): the in-flight Recorder while recording, else None; _voice_busy
         # guards the transcription window (stop clicked, text not back yet).
         self._voice_rec = None
         self._voice_busy = False
         self._voice_timer = None
+        self.voice_device = VOICE_DEVICE   # None → follow the Windows default input;
+                                           # else a device name (⚙ → Microphone…)
 
         self._build()
         self._register_hotkey()
@@ -364,20 +370,21 @@ class Overlay:
         alongside the others — the busy one keeps streaming in its own transcript."""
         if len(self._views) >= MAX_CHATS:
             self.add_sys(f"💬 Chat limit reached ({MAX_CHATS} parallel chats). Close one "
-                         "(💬 menu → Close), or raise MAX_CHATS in config.json.")
+                         "(☰ list → Close this chat), or raise MAX_CHATS in config.json.")
             return None
         v = self._new_chat_state()
         self._views.append(v)
         self._make_chat_widgets(v)
         self.switch_chat(v)
         self.add_sys(f"✦ {v.name} — a fresh conversation. Your other chats keep running; "
-                     "switch with the 💬 menu or Ctrl+Tab.")
+                     "switch with the ☰ list (top-left) or Ctrl+Tab.")
         self._refresh_chats_chip()
         return v
 
     def switch_chat(self, v):
         """Bring another chat to the front: park the entry draft, swap the transcript
         frame, restore that chat's draft + chrome (busy label, model line, gear lock)."""
+        self._hide_chat_list()
         if v is self._active or v not in self._views:
             return
         prev = self._active
@@ -403,10 +410,11 @@ class Overlay:
         if v.last_zoom != self.zoom:       # zoom changed while this chat was in the back —
             self._rezoom_embeds()          # its fixed-size embeds (bubbles/chips) catch up
             v.last_zoom = self.zoom
-        try:
-            self.chat.see("end")
-        except Exception:
-            pass
+        if v.follow:                       # each chat's Text keeps its own scroll position;
+            try:                           # only snap to the end if this chat was following
+                self.chat.see("end")
+            except Exception:
+                pass
 
     def close_chat(self):
         """Close the ACTIVE chat (💬 menu). Its agent session ends; the transcript is
@@ -516,6 +524,10 @@ class Overlay:
             self.f_icon, self.gear_glyph = mk(_icon_fam, 13), "\uE713"
         else:
             self.f_icon, self.gear_glyph = self.f_small, "⚙"
+        # Outline microphone (dictation glyph ChatGPT users know — the 🎙 emoji read as
+        # "karaoke") and the GlobalNav hamburger for the chat list, same icon face.
+        self.mic_glyph = "" if _icon_fam else "🎙"
+        self.nav_glyph = "" if _icon_fam else "☰"
 
         self._build_titlebar()
         self.hairline = tk.Frame(self.root, bg=T["border"], height=1)
@@ -874,6 +886,16 @@ class Overlay:
         self.titlebar = bar
         bar.pack_propagate(False)
         self._bind_drag(bar)
+        # Multi-chat: the conversation list lives TOP-LEFT (the Intercom/Zendesk compact-
+        # widget convention — the only pattern proven at this window width). The ☰ opens a
+        # full-panel list in place of the transcript; it shows the chat count and turns
+        # accent while a background chat has an unread finished reply.
+        self.chats_btn = tk.Label(bar, text=self.nav_glyph, bg=T["bg"], fg=T["muted"],
+                                  font=self.f_icon, cursor="hand2", width=3)
+        self.chats_btn.pack(side="left", padx=(self.px(6), 0))
+        self.chats_btn.bind("<Button-1>", lambda e: self.toggle_chat_list())
+        self.chats_btn.bind("<Enter>", lambda e: self.chats_btn.configure(fg=T["accent"]))
+        self.chats_btn.bind("<Leave>", lambda e: self._refresh_chats_chip())
         sz = self.px(24)
         mark = tk.Canvas(bar, width=sz, height=sz, bg=T["bg"], highlightthickness=0)
         mark.pack(side="left", padx=(self.px(14), self.px(7)))
@@ -1129,6 +1151,7 @@ class Overlay:
         else:                                              # clicked the track → jump there
             self._sb_drag = (y1 - y0) / 2
             self.chat.yview_moveto(max(0.0, min(1.0, (e.y - self._sb_drag) / h)))
+            self._note_user_scroll()
         self._sb_redraw()
 
     def _sb_motion(self, e):
@@ -1138,6 +1161,7 @@ class Overlay:
         if h <= 1:
             return
         self.chat.yview_moveto(max(0.0, min(1.0, (e.y - self._sb_drag) / h)))
+        self._note_user_scroll()
 
     def _build_input(self):
         wrap = tk.Frame(self.root, bg=T["bg"])
@@ -1184,19 +1208,10 @@ class Overlay:
         self.gear.bind("<Enter>", lambda e: self.gear.configure(fg=T["accent"]))
         self.gear.bind("<Leave>", lambda e: self._paint_gear())
         self._paint_gear()
-        # Multi-chat: the 💬 button opens the chat switcher (parallel conversations). It
-        # shows the count once there's more than one, and turns accent when a background
-        # chat finished a reply (its "unread" dot lives in the menu rows).
-        self.chats_btn = tk.Label(st, text="💬", bg=T["bg"], fg=T["muted"],
-                                  font=self.f_small, cursor="hand2")
-        self.chats_btn.pack(side="left", padx=(self.px(8), self.px(2)), pady=pad)
-        self.chats_btn.bind("<Button-1>", self._chats_menu)
-        self.chats_btn.bind("<Enter>", lambda e: self.chats_btn.configure(fg=T["accent"]))
-        self.chats_btn.bind("<Leave>", lambda e: self._refresh_chats_chip())
-        # Voice input: 🎤 click-to-record, click-again-to-transcribe (Esc cancels). The
+        # Voice input: click-to-record, click-again-to-transcribe (Esc cancels). The
         # transcript lands in the entry for REVIEW — dictation never auto-sends.
-        self.mic_btn = tk.Label(st, text="🎤", bg=T["bg"], fg=T["muted"],
-                                font=self.f_small, cursor="hand2")
+        self.mic_btn = tk.Label(st, text=self.mic_glyph, bg=T["bg"], fg=T["muted"],
+                                font=self.f_icon, cursor="hand2")
         self.mic_btn.pack(side="left", padx=(self.px(8), self.px(2)), pady=pad)
         self.mic_btn.bind("<Button-1>", lambda e: self.toggle_voice())
         self.mic_btn.bind("<Enter>", lambda e: self._paint_mic(hover=True))
@@ -1204,7 +1219,7 @@ class Overlay:
         self.attach_lbl = tk.Label(st, text="", bg=T["bg"], fg=T["accent"],
                                    font=self.f_small, cursor="hand2")
         self.attach_lbl.pack(side="left", padx=self.px(6), pady=pad)
-        self.attach_lbl.bind("<Button-1>", lambda e: self._clear_attachments())
+        self.attach_lbl.bind("<Button-1>", self._attach_click)
         self.grip = tk.Label(st, text="◢", bg=T["bg"], fg=T["faint"], font=self.f_small,
                              cursor="size_nw_se")
         self.grip.pack(side="right", padx=(0, self.px(8)), pady=pad)
@@ -1619,6 +1634,7 @@ class Overlay:
             (row(self.share_visible, "Shareable"), self.toggle_screen_share),
             (row(self.read_only, "Read-only"), self.toggle_read_only),
             ("      Add context folder…", self.add_context_dir),
+            ("      Microphone…", self.pick_microphone),
         ]
         if CONTEXT_DIRS:
             items.append((f"      Forget context folders ({len(CONTEXT_DIRS)})",
@@ -1659,25 +1675,56 @@ class Overlay:
                           (lambda r=rec: self.reopen_session(r))))
         return items
 
-    def _chats_menu(self, e):
-        m = tk.Menu(self.root, tearoff=0, bg=T["field"], fg=T["text"],
-                    activebackground=T["accent"], activeforeground=T["on_accent"], bd=0)
+    def toggle_chat_list(self):
+        """☰ (top-left): swap the transcript for a full-panel conversation list — the
+        compact-widget pattern (Intercom/Zendesk): no sidebar (would cost a third of
+        our width), no bottom menu (that row is for chat options). Rows come from
+        _chats_items, so the panel and the tests share one source of truth."""
+        if getattr(self, "_chat_list_frame", None) is not None:
+            self._hide_chat_list()
+            return
+        f = tk.Frame(self.chat_area, bg=T["bg"])
+        tk.Label(f, text="Conversations", bg=T["bg"], fg=T["muted"], font=self.f_chip,
+                 anchor="w").pack(fill="x", padx=self.px(16), pady=(self.px(10), self.px(2)))
         for lbl, cmd in self._chats_items():
-            m.add_command(label=lbl, command=cmd)
+            row = tk.Label(f, text=lbl, anchor="w", justify="left", bg=T["bg"],
+                           fg=T["text"], font=self.f_body, padx=self.px(16),
+                           pady=self.px(7), cursor="hand2")
+            row.pack(fill="x")
+            row.bind("<Enter>", lambda e, r=row: r.configure(bg=T["hover"]))
+            row.bind("<Leave>", lambda e, r=row: r.configure(bg=T["bg"]))
+            row.bind("<Button-1>", lambda e, c=cmd: self._chat_list_action(c))
+        self._active.wrap.pack_forget()
+        f.pack(fill="both", expand=True)
+        self._chat_list_frame = f
+        self._refresh_chats_chip()
+
+    def _chat_list_action(self, cmd):
+        self._hide_chat_list()
+        cmd()
+
+    def _hide_chat_list(self):
+        f = getattr(self, "_chat_list_frame", None)
+        if f is None:
+            return
+        self._chat_list_frame = None
         try:
-            m.tk_popup(e.x_root, e.y_root)
-        finally:
-            m.grab_release()
+            f.destroy()
+        except Exception:
+            pass
+        self._active.wrap.pack(fill="both", expand=True)
+        self._refresh_chats_chip()
 
     def _refresh_chats_chip(self):
-        """The 💬 button shows the chat count (once >1) and turns accent while any
-        background chat has an unread finished reply."""
+        """The ☰ button shows the chat count (once >1) and turns accent while the list
+        is open or any background chat has an unread finished reply."""
         if not hasattr(self, "chats_btn"):
             return
         n = len(self._views)
-        unread = any(v.unread for v in self._views)
-        self.chats_btn.configure(text=("💬" if n == 1 else f"💬 {n}"),
-                                 fg=(T["accent"] if unread else T["muted"]))
+        lit = (any(v.unread for v in self._views)
+               or getattr(self, "_chat_list_frame", None) is not None)
+        self.chats_btn.configure(text=(self.nav_glyph if n == 1 else f"{self.nav_glyph} {n}"),
+                                 fg=(T["accent"] if lit else T["muted"]))
 
     def _recent_choices(self, limit=4):
         """Recently-persisted sessions that are NOT already open in a chat — offered in
@@ -1709,7 +1756,30 @@ class Overlay:
         v.worker.resume(str(rec["id"]))
         self._replay_transcript(v, str(rec["id"]))   # show what was said, not a blank chat
 
-    # ── 🎤 voice input (dictation) ──
+    def pick_microphone(self):
+        """⚙ → Microphone…: Discord/Zoom-style device list — 'System default (name)'
+        first (follow Windows), then real WASAPI input devices, ✓ on the current pick.
+        The choice persists to config.json by NAME and applies to the next recording."""
+        rows = voice.list_input_devices()
+        m = tk.Menu(self.root, tearoff=0, bg=T["field"], fg=T["text"],
+                    activebackground=T["accent"], activeforeground=T["on_accent"], bd=0)
+        for label, value in rows:
+            mark = "✓  " if value == self.voice_device else "      "
+            m.add_command(label=mark + label,
+                          command=lambda v=value, l=label: self._set_voice_device(v, l))
+        try:
+            x, y = self.root.winfo_pointerxy()
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
+
+    def _set_voice_device(self, value, label):
+        self.voice_device = value
+        self._update_user_config("VOICE_DEVICE", value)
+        self.add_sys(f"🎙 Microphone: {label}. Applies to the next recording — click "
+                     "the mic and watch the level bar move to confirm it's live.")
+
+    # ── voice input (dictation) ──
     def _paint_mic(self, hover=False):
         if not hasattr(self, "mic_btn"):
             return
@@ -1721,7 +1791,7 @@ class Overlay:
             self.mic_btn.configure(fg=T["accent"] if hover else T["muted"])
 
     def toggle_voice(self):
-        """🎤 click: start recording; click again: stop + transcribe into the entry.
+        """🎙 click: start recording; click again: stop + transcribe into the entry.
         Esc while recording cancels. Recording keeps working while replies stream —
         it's independent of any chat's busy state."""
         if self._voice_rec is not None:
@@ -1731,7 +1801,7 @@ class Overlay:
             return                                    # a transcription is already in flight
         missing = voice.missing_deps()
         if missing:
-            self.add_sys("🎤 Voice input needs two optional packages (everything stays "
+            self.add_sys("🎙 Voice input needs two optional packages (everything stays "
                          "on your machine):\n"
                          "      pip install -r requirements-voice.txt\n"
                          f"      (missing: {', '.join(missing)})\n"
@@ -1740,13 +1810,16 @@ class Overlay:
             return
         rec = voice.Recorder()
         try:
-            rec.start()
+            rec.start(self.voice_device)
         except Exception as e:
-            self.add_err(f"🎤 Couldn't open the microphone: {type(e).__name__}: {e}")
+            self.add_err(f"🎙 Couldn't open the microphone: {type(e).__name__}: {e}\n"
+                         "Pick a different one in ⚙ → Microphone, and check Windows "
+                         "Settings → Privacy & security → Microphone → 'Let desktop "
+                         "apps access your microphone'.")
             return
         self._voice_rec = rec
         self._paint_mic()
-        self._set_status("● recording — click 🎤 to stop, Esc to cancel")
+        self._set_status("● recording — click 🎙 to stop, Esc to cancel")
         self._voice_tick()
 
     def _voice_tick(self):
@@ -1755,7 +1828,15 @@ class Overlay:
         if rec is None:
             return
         el = int(rec.elapsed())
-        self.mic_btn.configure(text=f"🎤 {el // 60}:{el % 60:02d}")
+        self.mic_btn.configure(text=f"{self.mic_glyph} {el // 60}:{el % 60:02d}")
+        # live level bars next to the status text — visible proof the mic is capturing
+        # (a dead/wrong device shows a flat bar, which is its own diagnosis)
+        level = min(1.0, getattr(rec, "peak", 0.0) * 8)
+        if hasattr(rec, "peak"):
+            rec.peak = 0.0                         # peak since the LAST tick
+        bars = "▁▂▃▄▅▆▇"
+        bar = bars[max(0, min(len(bars) - 1, int(level * (len(bars) - 1))))]
+        self._set_status(f"● recording {bar}  — click to stop, Esc to cancel")
         if el >= voice.MAX_SECONDS:
             self._finish_voice(cancel=False)
             return
@@ -1769,14 +1850,18 @@ class Overlay:
             except Exception:
                 pass
             self._voice_timer = None
-        self.mic_btn.configure(text="🎤")
+        self.mic_btn.configure(text=self.mic_glyph)
         audio = rec.stop() if rec is not None else None
         if cancel or audio is None:
             self._set_status("")
             self._paint_mic()
             if not cancel and rec is not None:
-                self.add_sys("🎤 Nothing was captured — is the right microphone set as "
-                             "the Windows default?")
+                self.add_sys("🎙 Nothing was captured. Three usual causes, in order: the "
+                             "wrong microphone is selected (⚙ → Microphone — virtual "
+                             "devices like phone-camera mics record silence when the "
+                             "phone isn't connected), Windows privacy blocks desktop "
+                             "apps (Settings → Privacy & security → Microphone), or the "
+                             "input volume is at zero.")
             return
         self._voice_busy = True
         self._paint_mic()
@@ -1800,7 +1885,7 @@ class Overlay:
         self._set_status("")
         self._paint_mic()
         if not (text or "").strip():
-            self.add_sys("🎤 Didn't catch any words — try again a little closer to the mic.")
+            self.add_sys("🎙 Didn't catch any words — try again a little closer to the mic.")
             return
         # Into the entry AT THE CURSOR, for review — never auto-sent. A trailing space
         # so consecutive dictations join cleanly.
@@ -2016,9 +2101,100 @@ class Overlay:
         n = len(self.pending_images)
         self.attach_lbl.configure(text=(f"📎 {n} image{'s' if n != 1 else ''}  ✕" if n else ""))
 
+    def _attach_click(self, e):
+        """Pending-attachment chip: the ✕ zone (right edge) clears; anywhere else
+        previews the first pending image full-size — verify what's attached BEFORE it
+        goes (the ChatGPT screenshot-tool pattern)."""
+        if not self.pending_images:
+            return
+        if e.x >= self.attach_lbl.winfo_width() - self.px(18):
+            self._clear_attachments()
+        else:
+            self._open_lightbox(self.pending_images[0])
+
     def _clear_attachments(self):
         self.pending_images = []
         self._refresh_attach()
+
+    # ── image thumbnails + viewer ──
+    def _add_shot_thumbs(self, paths):
+        """Small clickable previews of the images that just went with a message, under
+        the bubble — visible proof of exactly what Claude saw (the 🖼 marker alone said
+        "something was captured" without showing what). Click one → full-size viewer."""
+        shown = 0
+        for p in paths:
+            if shown >= 4:                       # a paste-bomb doesn't wallpaper the chat
+                break
+            try:
+                img = Image.open(p)
+                img.thumbnail((self.px(240), self.px(180)), Image.LANCZOS)  # never upscales
+                ph = ImageTk.PhotoImage(img)
+            except Exception:
+                continue
+            lbl = tk.Label(self.chat, image=ph, bg=T["bg"], cursor="hand2",
+                           highlightthickness=1, highlightbackground=T["border"])
+            lbl._photo = ph                      # Tk keeps only the image NAME — hold the ref
+            lbl.bind("<Button-1>", lambda e, pp=str(p): self._open_lightbox(pp))
+            lbl.bind("<MouseWheel>", self._fwd_wheel)
+            at_bottom = self.follow
+            self.chat.insert("end", "\n")
+            self.chat.window_create("end", window=lbl, padx=self.px(16), pady=self.px(2))
+            self.chat.insert("end", "\n")
+            if at_bottom:
+                self.chat.see("end")
+            shown += 1
+        self._prune_chat()
+
+    def _open_lightbox(self, path):
+        """Full-size image viewer: borderless dark Toplevel scaled to fit the work
+        area, closed by Esc, any click, or the ✕ — all three, so it never feels like a
+        trap. One at a time."""
+        old = getattr(self, "_lightbox", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        try:
+            img = Image.open(path)
+        except Exception as e:
+            self.add_err(f"Couldn't open the image ({type(e).__name__}) — screenshots "
+                         "live in a temp folder and may have been cleaned up.")
+            return None
+        top = tk.Toplevel(self.root)
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.configure(bg="#000000")
+        wa = wt.RECT()                           # primary work area (excludes taskbar)
+        _user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+        ww, wh = wa.right - wa.left, wa.bottom - wa.top
+        img.thumbnail((max(200, ww - self.px(60)), max(200, wh - self.px(60))),
+                      Image.LANCZOS)
+        ph = ImageTk.PhotoImage(img)
+        lbl = tk.Label(top, image=ph, bg="#000000")
+        lbl._photo = ph
+        lbl.pack(padx=self.px(10), pady=self.px(10))
+
+        def close(_e=None):
+            self._lightbox = None
+            try:
+                top.destroy()
+            except Exception:
+                pass
+        x_btn = tk.Label(top, text="✕", bg="#000000", fg="#DDDDDD",
+                         font=self.f_title, cursor="hand2")
+        x_btn.place(relx=1.0, y=0, anchor="ne")
+        for w in (top, lbl, x_btn):
+            w.bind("<Button-1>", close)
+        top.bind("<Escape>", close)
+        top._close = close        # named handle: tests can't synthesize key events on an
+                                  # unmapped window (the suite runs withdrawn)
+        top.update_idletasks()
+        tw, th = top.winfo_reqwidth(), top.winfo_reqheight()
+        top.geometry(f"+{wa.left + max(0, (ww - tw) // 2)}+{wa.top + max(0, (wh - th) // 2)}")
+        top.focus_set()                          # overrideredirect windows don't take focus
+        self._lightbox = top                     # alone, and Esc needs it
+        return top
 
     # ── window drag / resize / rounding ──
     def _bind_drag(self, w):
@@ -2364,7 +2540,7 @@ class Overlay:
 
     def _ins(self, text, *tags):
         text = "" if text is None else str(text)   # Tk insert rejects None
-        at_bottom = self.chat.yview()[1] > 0.999
+        at_bottom = self.follow
         self.chat.insert("end", text, tags)
         if at_bottom:
             self.chat.see("end")
@@ -2376,7 +2552,7 @@ class Overlay:
         self._turn_copy_added = False
         # a new task → clear the "done" badge, unless another chat still has unread news
         self._set_task_badge(any(v.unread for v in self._views))
-        at_bottom = self.chat.yview()[1] > 0.999
+        at_bottom = self.follow
         self.chat.insert("end", "\n")
         self.chat.window_create("end", window=self._user_bubble(text), pady=self.px(3))
         self.chat.insert("end", "\n")
@@ -2508,7 +2684,7 @@ class Overlay:
         at_bottom = False
         if scroll:
             try:
-                at_bottom = self.chat.yview()[1] > 0.999
+                at_bottom = self.follow
             except Exception:
                 at_bottom = False
             if giant:
@@ -2554,12 +2730,12 @@ class Overlay:
             self._raw_ins(part, "a")                    # no marker (or line too long) → cheap append
 
     def _md_autoscroll_final(self):
-        """One-shot scroll-to-end at turn end (a giant line's last deltas may have been throttled
-        out, leaving the view a hair off the bottom). Loose threshold so 'slightly behind due to
-        throttling' still snaps to the end, while a user who clearly scrolled up to read earlier
-        content is left alone."""
+        """One-shot scroll-to-end at turn end (a giant line's last deltas may have been
+        throttled out, leaving the view a hair off the bottom). Follows the per-chat
+        `follow` flag — the old fractional test (yview > 0.90) yanked a user who had
+        scrolled up to read whenever a tool chip or table finalized near the bottom."""
         try:
-            if self.chat.yview()[1] > 0.90:
+            if self.follow:
                 self.chat.see("end")
         except Exception:
             pass
@@ -2846,7 +3022,7 @@ class Overlay:
             return
         self._md_finalize()              # seal the answer text streamed so far, then the tool chip
         self._ensure_header()
-        at_bottom = self.chat.yview()[1] > 0.999
+        at_bottom = self.follow
         self.chat.insert("end", "\n")
         self.chat.window_create("end", window=self._tool_chip(name, self._summ(inp, 46)),
                                 padx=self.px(16), pady=self.px(3))
@@ -2985,7 +3161,7 @@ class Overlay:
         No-ops on empty/whitespace text (e.g. a turn that produced only tool calls)."""
         if not (text and str(text).strip()):
             return
-        at_bottom = self.chat.yview()[1] > 0.999
+        at_bottom = self.follow
         self.chat.insert("end", "\n")
         self.chat.window_create("end", window=self._copy_btn(text), padx=self.px(16), pady=self.px(1))
         self.chat.insert("end", "\n")
@@ -3167,7 +3343,7 @@ class Overlay:
         self.add_sys(f"🔔 Your Claude CLI is out of date (v{inst} → v{latest}). The overlay is "
                      "current, but the CLI it drives isn't — and the newest models need the "
                      "latest CLI. Update it in one click:")
-        at_bottom = self.chat.yview()[1] > 0.999
+        at_bottom = self.follow
         self.chat.insert("end", "\n")
         self.chat.window_create("end", window=self._cli_update_btn(latest),
                                 padx=self.px(16), pady=self.px(2))
@@ -3432,6 +3608,9 @@ class Overlay:
         if text and not self._cur.first_prompt:   # 💬-menu snippet + Reopen-record name
             self._cur.first_prompt = text[:60]
         self.add_user(label)
+        thumb_paths = [s["path"] for s in (shots or [])] + list(images)
+        if thumb_paths:                  # show WHAT was captured, not just that something was
+            self._add_shot_thumbs(thumb_paths)
         if IMAGE_INPUT == "inline":
             paths = [s["path"] for s in (shots or [])] + list(images)
             self.worker.ask(self._inline_text(text, shots, images), paths)
@@ -3823,6 +4002,7 @@ class Overlay:
         self._forget_recent(self._session_id)   # also gone from 💬 → Reopen
         self._session_id = None
         self._cur.first_prompt = ""      # next send names this (fresh) conversation
+        self.follow = True               # empty chat → following again
         # Guard the window until the worker confirms the reset (reset_done): a stale
         # (session / turn_done) batch from the turn that was in flight when Clear was
         # clicked would otherwise re-set _session_id and re-persist the discarded record.
@@ -4000,7 +4180,7 @@ class Overlay:
         self.chat.tag_configure("compact", foreground=T["accent"], font=self.f_chip,
                                 lmargin1=self.px(18), lmargin2=self.px(18), rmargin=self.px(14),
                                 spacing1=self.px(6), spacing3=self.px(4))
-        at_bottom = self.chat.yview()[1] > 0.999
+        at_bottom = self.follow
         self.chat.insert("end", "\n")
         start = self.chat.index("end-1c")           # start of our (about-to-be-written) line
         self.chat.insert("end", " \n", "compact")
@@ -4125,7 +4305,15 @@ class Overlay:
         # streaming and how big the transcript is, so the intermittent scroll lag can be
         # caught in the act and attributed (large transcript vs. streaming contention).
         t0 = time.monotonic()
-        self.chat.yview_scroll(int(-e.delta / 120), "units")
+        # Scroll by PIXELS with Tk's own native Text formula (delta/3 px, asymmetric floor
+        # rounding — see tk8.6/text.tcl). "units" scrolled by display LINES, and an embedded
+        # table is ONE tall line, so crossing it lurched by its full height; pixels also make
+        # precision-touchpad deltas (<120) actually scroll instead of rounding to zero.
+        if e.delta >= 0:
+            self.chat.yview_scroll(-e.delta // 3, "pixels")
+        else:
+            self.chat.yview_scroll((2 - e.delta) // 3, "pixels")
+        self._note_user_scroll()
         if DEBUG_LOG:
             dt = (time.monotonic() - t0) * 1000
             if dt > 50:   # only genuinely janky frames
@@ -4135,6 +4323,15 @@ class Overlay:
                 except Exception:
                     lines = -1; wins = -1
                 dbg("scroll_slow", f"{dt:.0f}ms streaming={getattr(self, 'busy', False)} lines={lines} embeds={wins}")
+
+    def _note_user_scroll(self):
+        """The USER just scrolled (wheel or scrollbar): auto-follow disengages when they
+        move up to read and re-engages only when they come back to the bottom. This is
+        the only place `follow` changes — streaming content can never flip it."""
+        try:
+            self.follow = self.chat.yview()[1] >= 0.999
+        except Exception:
+            pass
 
     # ── event pump ──
     def _poll(self):
@@ -4330,7 +4527,7 @@ class Overlay:
             self._voice_busy = False
             self._set_status("")
             self._paint_mic()
-            self.add_err(f"🎤 Transcription failed: {payload}")
+            self.add_err(f"🎙 Transcription failed: {payload}")
         elif kind == "compacting":
             self._start_compact_anim()
         elif kind == "compact_done":
@@ -4456,6 +4653,7 @@ _CHAT_FIELDS = (
     "_turn_copy_added", "_session_id", "_discard_pending",
     "_compacting", "_compact_line", "_compact_anim_after", "_compact_t0",
     "_compact_frame", "_zoomables", "_sb_first", "_sb_last", "_sb_drag", "_sb_hover",
+    "follow",
 )
 # Per-chat objects that are read but never assigned through Overlay:
 _CHAT_READONLY = ("chat", "scrollbar", "worker", "ui_q")

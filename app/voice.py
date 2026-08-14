@@ -49,25 +49,80 @@ def available():
     return not missing_deps()
 
 
+def list_input_devices():
+    """[(label, value)] rows for a mic picker. First row is always
+    ("System default (…)", None) — value None means "follow Windows". The rest are
+    real input devices filtered to the WASAPI host API (one entry per physical device;
+    PortAudio otherwise lists every device 3-4x across MME/DirectSound/WASAPI/WDM-KS,
+    and MME truncates names to 31 chars). Values are device NAMES — stable across
+    restarts, unlike indices."""
+    default_name = None
+    rows = []
+    try:
+        import sounddevice as sd
+        try:
+            default_name = sd.query_devices(kind="input")["name"]
+        except Exception:
+            pass
+        for api in sd.query_hostapis():
+            if "WASAPI" not in api["name"]:
+                continue
+            for idx in api["devices"]:
+                dev = sd.query_devices(idx)
+                if dev["max_input_channels"] > 0:
+                    rows.append((dev["name"], dev["name"]))
+    except Exception:
+        pass
+    label = f"System default ({default_name})" if default_name else "System default"
+    return [(label, None)] + rows
+
+
+def _resolve_device(name):
+    """(device_index_or_None, extra_settings) for InputStream. A picked name resolves
+    to its WASAPI endpoint with AUTOCONVERTPCM (so 16 kHz works whatever the device's
+    shared-mode format); None/unresolvable → PortAudio default (MME, which resamples)."""
+    if not name:
+        return None, None
+    try:
+        import sounddevice as sd
+        for api in sd.query_hostapis():
+            if "WASAPI" not in api["name"]:
+                continue
+            for idx in api["devices"]:
+                dev = sd.query_devices(idx)
+                if dev["name"] == name and dev["max_input_channels"] > 0:
+                    return idx, sd.WasapiSettings(auto_convert=True)
+    except Exception:
+        pass
+    return None, None
+
+
 class Recorder:
-    """One utterance: start() opens the default mic and buffers audio on PortAudio's
-    callback thread; stop() closes the stream and returns the captured mono float32
-    array (or None if nothing usable was captured). A fresh Recorder per utterance —
-    reopening each time also picks up a changed default-mic setting."""
+    """One utterance: start() opens the mic and buffers audio on PortAudio's callback
+    thread; stop() closes the stream and returns the captured mono float32 array (or
+    None if nothing usable was captured). A fresh Recorder per utterance — reopening
+    each time also picks up a changed default-mic setting. `peak` holds the highest
+    |sample| since the UI last zeroed it — the live level-meter feed."""
 
     def __init__(self):
         self._chunks = []
         self._stream = None
         self._t0 = None
+        self.peak = 0.0
 
-    def start(self):
+    def start(self, device_name=None):
         import sounddevice as sd
 
         def cb(indata, frames, t, status):   # PortAudio thread — no Tk here
             self._chunks.append(indata.copy())
+            p = float(abs(indata).max())
+            if p > self.peak:
+                self.peak = p
 
+        device, extra = _resolve_device(device_name)
         self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                      dtype="float32", callback=cb)
+                                      dtype="float32", callback=cb,
+                                      device=device, extra_settings=extra)
         self._stream.start()
         self._t0 = time.monotonic()
 

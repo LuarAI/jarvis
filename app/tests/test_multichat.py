@@ -170,9 +170,10 @@ class TestUnread:
         assert v1.unread is False
 
     def test_chip_counts_chats(self, overlay):
-        assert overlay.chats_btn.cget("text") == "💬"
+        g = overlay.nav_glyph
+        assert overlay.chats_btn.cget("text") == g
         overlay.new_chat()
-        assert overlay.chats_btn.cget("text") == "💬 2"
+        assert overlay.chats_btn.cget("text") == f"{g} 2"
 
 
 # ---------------------------------------------------------------------------
