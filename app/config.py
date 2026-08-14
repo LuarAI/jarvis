@@ -112,6 +112,11 @@ MAX_CHATS = 4                     # cap on parallel chats (each is its own agent
                                   # rate-limit stalls, and many long-lived processes sharing one
                                   # login can race the OAuth token refresh. Raise in config.json
                                   # (up to 12) if your plan takes it.
+VOICE_MODEL = "small"             # local dictation model (🎤): Whisper size run on-device via
+                                  # faster-whisper. "small" (~480 MB, downloads on first use) is
+                                  # the sweet spot for Spanish/English dictation; "base" (~145 MB)
+                                  # is faster but noticeably worse in Spanish; "tiny" is English-
+                                  # only-grade. Needs the optional deps (requirements-voice.txt).
 SKILLS = "all"                    # which Agent SDK skills to enable in the overlay. Default None
                                   # means the overlay discovers NO skills (the SDK only wires up
                                   # skill discovery when this is set). A list enables ONLY those
@@ -437,6 +442,7 @@ _USER_CONFIG_KEYS = {
     # Requires a recent model (Haiku is not supported) and an account with auto mode enabled.
     "PERMISSION_MODE": _v_choice("bypassPermissions", "acceptEdits", "default", "plan", "auto"),
     "MAX_CHATS": _v_num(1, 12, int),
+    "VOICE_MODEL": _v_choice("tiny", "base", "small", "medium", "large-v3"),
     "SKILLS": _v_skills,                       # "all" | ["name", …] | null
     "STRICT_MCP_CONFIG": _v_bool,
     "MCP_SERVERS": _v_mcp_servers,             # {name: {...}} — loads even under strict

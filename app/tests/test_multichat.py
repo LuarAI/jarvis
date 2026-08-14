@@ -254,6 +254,28 @@ class TestRecentSessions:
 
 
 # ---------------------------------------------------------------------------
+# model stickiness: new chats launch with the user's last-selected model
+# ---------------------------------------------------------------------------
+
+class TestModelStickiness:
+
+    def test_switch_model_persists_choice(self, overlay):
+        overlay._switch_model("opus")
+        assert ("set_model", ("opus",)) in overlay.worker.calls
+        assert co._load_state().get("model") == "opus"
+
+    def test_new_chat_launches_with_last_selected_model(self, overlay):
+        co._save_state(model="opus")
+        v = overlay.new_chat()
+        assert v.worker.model == "opus"           # FakeWorker records the launch model
+
+    def test_config_default_when_nothing_selected(self, overlay):
+        co._save_state(model=None)
+        v = overlay.new_chat()
+        assert v.worker.model == co.MODEL
+
+
+# ---------------------------------------------------------------------------
 # shutdown
 # ---------------------------------------------------------------------------
 

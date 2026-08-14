@@ -42,11 +42,12 @@ class FakeWorker:
     """Stand-in for ClaudeWorker: stores the UI queue, records calls for assertions,
     starts no thread and connects to nothing."""
 
-    def __init__(self, ui_queue, permission_mode=None):
+    def __init__(self, ui_queue, permission_mode=None, model=None):
         self.ui = ui_queue
         self.req = queue.Queue()
         self.calls = []
         self.permission_mode = permission_mode   # launch mode the Overlay asked for
+        self.model = model                       # launch model the Overlay asked for
 
     def _rec(self, name, *a):
         self.calls.append((name, a))
@@ -103,7 +104,7 @@ def _clean_overlay(ov):
     # Cancel any after() timers a prior test may have scheduled (zoom re-render, region
     # re-apply, compaction animation, precapture) so none fires mid-next-test.
     for _attr in ("_rezoom_after", "_round_after", "_compact_anim_after",
-                  "_precapture_after"):
+                  "_precapture_after", "_voice_timer"):
         _tid = getattr(ov, _attr, None)
         if _tid is not None:
             try:
@@ -125,6 +126,7 @@ def _clean_overlay(ov):
         ov._views[0].first_prompt = ""
         ov._views[0].draft = ""
         ov._refresh_chats_chip()
+        co._save_state(model=None)      # a persisted model pick must not leak between tests
     except Exception:
         pass
     try:
@@ -156,6 +158,12 @@ def _clean_overlay(ov):
     ov._auth_checked = 0.0
     ov._send_hover = False
     ov._thinking_active = False
+    ov._voice_rec = None                # a test that started 'recording' must not leak it
+    ov._voice_busy = False
+    try:
+        ov.mic_btn.configure(text="🎤")
+    except Exception:
+        pass
     try:
         ov._set_busy(False)             # busy flag + Send button image + busy_lbl text, together
     except Exception:

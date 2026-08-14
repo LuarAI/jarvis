@@ -1,0 +1,8 @@
+# Optional: local voice input (🎤 dictation). Install with:
+#   pip install -r requirements-voice.txt
+# Everything runs on-device (MIT-licensed stack, CPU-only, no torch, no cloud).
+# The speech model itself downloads from Hugging Face on first use
+# (~145 MB for "base", ~480 MB for the default "small" — set VOICE_MODEL in config.json).
+faster-whisper>=1.1
+sounddevice>=0.4.6
+numpy

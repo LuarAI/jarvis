@@ -70,7 +70,7 @@ from modelresolve import resolve_model
 import authstate
 
 class ClaudeWorker(threading.Thread):
-    def __init__(self, ui_queue: "queue.Queue", permission_mode=None):
+    def __init__(self, ui_queue: "queue.Queue", permission_mode=None, model=None):
         super().__init__(daemon=True)
         # Tap the UI channel so the debug log captures every worker→UI event (no-op when
         # DEBUG_LOG is ""). The UI side keeps reading the raw queue.
@@ -81,10 +81,13 @@ class ClaudeWorker(threading.Thread):
         self._running = True
         self._saw_stream = False
         self._lifecycle_task = None   # the in-flight connect()/disconnect() task, if any
-        # Concrete id the family alias (config.MODEL) resolves to. Resolved once in run()
-        # before the event loop starts; defaults to the raw alias so nothing breaks if
-        # resolution is skipped or fails. See modelresolve for WHY (streaming alias lag).
-        self._resolved_model = MODEL
+        # The model this session launches with: the caller's choice (multi-chat passes the
+        # user's LAST-SELECTED model, so a new chat doesn't snap back to the config default),
+        # falling back to config.MODEL. May be a family alias — resolved to a concrete id
+        # once in run(); defaults to the raw value so nothing breaks if resolution is
+        # skipped or fails. See modelresolve for WHY (streaming alias lag).
+        self._initial_model = model if (isinstance(model, str) and model.strip()) else MODEL
+        self._resolved_model = self._initial_model
         # The ACTIVE permission mode. Starts at the caller's launch mode (the UI passes
         # the remembered Read-only state; None → the config constant); the status-bar
         # "Read-only" toggle switches it at run time ("plan" ⇄ the full-access mode).
@@ -374,11 +377,11 @@ class ClaudeWorker(threading.Thread):
         # never stop the worker from starting; on failure we keep the raw alias.
         self.ui.put(("status", "finding latest model…"))
         try:
-            resolved = resolve_model(MODEL)
+            resolved = resolve_model(self._initial_model)
             if isinstance(resolved, str) and resolved:
                 self._resolved_model = resolved
-            if self._resolved_model != MODEL:
-                dbg("model_resolved", {"alias": MODEL, "id": self._resolved_model})
+            if self._resolved_model != self._initial_model:
+                dbg("model_resolved", {"alias": self._initial_model, "id": self._resolved_model})
         except Exception as e:
             dbg("model_resolve_err", f"{type(e).__name__}: {e}")
         finally:

@@ -113,6 +113,7 @@ try:
     from win32utils import _user32, _gdi32
     from worker import ClaudeWorker
     import authstate
+    import voice
 except Exception as _e:
     _report_import_failure(_e)
 
@@ -168,6 +169,22 @@ def _save_state(**updates):
         os.replace(tmp, STATE_FILE)
     except Exception:
         pass
+
+
+def _fetch_session_messages(session_id):
+    """The CLI's stored transcript for one session (module-level + import-inside so
+    tests can stub it and the SDK import cost stays off the UI thread)."""
+    from claude_agent_sdk import get_session_messages
+    return get_session_messages(str(session_id), directory=WORKING_DIR)
+
+
+def _startup_model():
+    """The model new sessions launch with: the user's last model-switcher choice (a
+    deliberate selection, persisted like the other toggles) wins over the config
+    default — so a new chat, and the next launch, keep the model you picked instead
+    of snapping back to config.MODEL."""
+    saved = _load_state().get("model")
+    return saved if (isinstance(saved, str) and saved.strip()) else MODEL
 
 
 def _startup_permission_mode():
@@ -229,7 +246,6 @@ class ChatView:
         self._turn_raw = ""
         self._turn_copy_added = False
         self._session_id = None
-        self._resume_btn = None
         self._discard_pending = False
         self._compacting = False
         self._compact_line = False
@@ -320,6 +336,11 @@ class Overlay:
                                           # clipped collapsed window; None → plain orb sprite/ellipse
         self._task_done_badge = False     # show a "stage complete" badge on the collapsed orb after
                                           # a reply finishes while collapsed; cleared on expand/new turn
+        # Voice input (🎤): the in-flight Recorder while recording, else None; _voice_busy
+        # guards the transcription window (stop clicked, text not back yet).
+        self._voice_rec = None
+        self._voice_busy = False
+        self._voice_timer = None
 
         self._build()
         self._register_hotkey()
@@ -332,7 +353,7 @@ class Overlay:
         self._chat_seq += 1
         ro, launch_mode = _startup_permission_mode()
         q: "queue.Queue" = queue.Queue()
-        w = ClaudeWorker(q, permission_mode=launch_mode)
+        w = ClaudeWorker(q, permission_mode=launch_mode, model=_startup_model())
         v = ChatView(self._chat_seq, w, q)
         v.read_only = ro
         w.start()
@@ -514,6 +535,7 @@ class Overlay:
         # The Text class binds Ctrl+N to cursor-down; bind on the entry too, with break.
         self.entry.bind("<Control-n>", lambda e: (self.new_chat(), "break")[1])
         self.entry.bind("<Control-N>", lambda e: (self.new_chat(), "break")[1])
+        self.root.bind("<Escape>", self._cancel_voice)   # Esc cancels an in-flight recording
         self._intro()
         # A remembered Read-only choice silently overriding the config default is a
         # SAFETY state — say so up front, so a launch never surprises.
@@ -527,7 +549,7 @@ class Overlay:
         # launch a full-access session the user believed was read-only.
         for w in USER_CONFIG_WARNINGS:
             self.add_sys(f"⚠ {USER_CONFIG_FILE.name}: {w}")
-        self._maybe_offer_resume()
+        self._maybe_restore_last()
 
         self.root.after(130, lambda: (self.root.focus_force(), self.entry.focus_set()))
         self.root.bind("<Configure>", self._on_configure)
@@ -1171,6 +1193,14 @@ class Overlay:
         self.chats_btn.bind("<Button-1>", self._chats_menu)
         self.chats_btn.bind("<Enter>", lambda e: self.chats_btn.configure(fg=T["accent"]))
         self.chats_btn.bind("<Leave>", lambda e: self._refresh_chats_chip())
+        # Voice input: 🎤 click-to-record, click-again-to-transcribe (Esc cancels). The
+        # transcript lands in the entry for REVIEW — dictation never auto-sends.
+        self.mic_btn = tk.Label(st, text="🎤", bg=T["bg"], fg=T["muted"],
+                                font=self.f_small, cursor="hand2")
+        self.mic_btn.pack(side="left", padx=(self.px(8), self.px(2)), pady=pad)
+        self.mic_btn.bind("<Button-1>", lambda e: self.toggle_voice())
+        self.mic_btn.bind("<Enter>", lambda e: self._paint_mic(hover=True))
+        self.mic_btn.bind("<Leave>", lambda e: self._paint_mic())
         self.attach_lbl = tk.Label(st, text="", bg=T["bg"], fg=T["accent"],
                                    font=self.f_small, cursor="hand2")
         self.attach_lbl.pack(side="left", padx=self.px(6), pady=pad)
@@ -1677,6 +1707,106 @@ class Overlay:
         v._session_id = str(rec["id"])   # so _recent_choices hides it while it's open
         self._set_status("resuming conversation…")
         v.worker.resume(str(rec["id"]))
+        self._replay_transcript(v, str(rec["id"]))   # show what was said, not a blank chat
+
+    # ── 🎤 voice input (dictation) ──
+    def _paint_mic(self, hover=False):
+        if not hasattr(self, "mic_btn"):
+            return
+        if self._voice_rec is not None:
+            self.mic_btn.configure(fg=T["err"])                    # recording → red
+        elif self._voice_busy:
+            self.mic_btn.configure(fg=T["accent"])                 # transcribing
+        else:
+            self.mic_btn.configure(fg=T["accent"] if hover else T["muted"])
+
+    def toggle_voice(self):
+        """🎤 click: start recording; click again: stop + transcribe into the entry.
+        Esc while recording cancels. Recording keeps working while replies stream —
+        it's independent of any chat's busy state."""
+        if self._voice_rec is not None:
+            self._finish_voice(cancel=False)
+            return
+        if self._voice_busy:
+            return                                    # a transcription is already in flight
+        missing = voice.missing_deps()
+        if missing:
+            self.add_sys("🎤 Voice input needs two optional packages (everything stays "
+                         "on your machine):\n"
+                         "      pip install -r requirements-voice.txt\n"
+                         f"      (missing: {', '.join(missing)})\n"
+                         "Then click the mic again — the speech model downloads once on "
+                         "first use.")
+            return
+        rec = voice.Recorder()
+        try:
+            rec.start()
+        except Exception as e:
+            self.add_err(f"🎤 Couldn't open the microphone: {type(e).__name__}: {e}")
+            return
+        self._voice_rec = rec
+        self._paint_mic()
+        self._set_status("● recording — click 🎤 to stop, Esc to cancel")
+        self._voice_tick()
+
+    def _voice_tick(self):
+        """Elapsed-time feedback on the mic while recording + the runaway hard stop."""
+        rec = self._voice_rec
+        if rec is None:
+            return
+        el = int(rec.elapsed())
+        self.mic_btn.configure(text=f"🎤 {el // 60}:{el % 60:02d}")
+        if el >= voice.MAX_SECONDS:
+            self._finish_voice(cancel=False)
+            return
+        self._voice_timer = self.root.after(500, self._voice_tick)
+
+    def _finish_voice(self, cancel):
+        rec, self._voice_rec = self._voice_rec, None
+        if self._voice_timer is not None:
+            try:
+                self.root.after_cancel(self._voice_timer)
+            except Exception:
+                pass
+            self._voice_timer = None
+        self.mic_btn.configure(text="🎤")
+        audio = rec.stop() if rec is not None else None
+        if cancel or audio is None:
+            self._set_status("")
+            self._paint_mic()
+            if not cancel and rec is not None:
+                self.add_sys("🎤 Nothing was captured — is the right microphone set as "
+                             "the Windows default?")
+            return
+        self._voice_busy = True
+        self._paint_mic()
+        self._set_status("transcribing…")
+
+        def bg():   # model load (first use: download) + transcribe, off the UI thread
+            try:
+                text = voice.transcribe(audio, VOICE_MODEL)
+                self._app_q.put(("voice_text", text))
+            except Exception as e:
+                self._app_q.put(("voice_err", f"{type(e).__name__}: {e}"))
+        threading.Thread(target=bg, daemon=True).start()
+
+    def _cancel_voice(self, e=None):
+        if self._voice_rec is not None:
+            self._finish_voice(cancel=True)
+            return "break"
+
+    def _on_voice_text(self, text):
+        self._voice_busy = False
+        self._set_status("")
+        self._paint_mic()
+        if not (text or "").strip():
+            self.add_sys("🎤 Didn't catch any words — try again a little closer to the mic.")
+            return
+        # Into the entry AT THE CURSOR, for review — never auto-sent. A trailing space
+        # so consecutive dictations join cleanly.
+        self._ph_out()
+        self.entry.insert("insert", text.strip() + " ")
+        self.entry.focus_set()
 
     # ── rounded input layout ──
     def _layout_input(self, e=None):
@@ -2882,12 +3012,14 @@ class Overlay:
         self._ins("\n⚠  " + ("" if text is None else str(text)) + "\n", "err")
 
     # ── "your CLI is out of date" notice + one-click update (see cliupdate.py) ──────────
-    def _maybe_offer_resume(self):
+    def _maybe_restore_last(self):
         """On launch, if the previous run left a conversation behind (its session id is
-        persisted on every completed turn — see _persist_session), drop a one-click
-        Resume button into the chat. Only for a session from the SAME working dir (the
-        CLI stores sessions per directory) and not too old; Clear wipes the record, so
-        a deliberately discarded conversation is never offered back."""
+        persisted on every completed turn — see _persist_session), restore it like a
+        messenger app: resume the session in chat 1 AND replay its stored transcript,
+        so the user picks up exactly where they left off — no button, no empty window.
+        Only for a session from the SAME working dir (the CLI stores sessions per
+        directory) and not too old; Clear wipes the record, so a deliberately
+        discarded conversation never comes back."""
         if not RESUME_OFFER:
             return
         saved = _load_state().get("last_session")
@@ -2899,15 +3031,14 @@ class Overlay:
         age = (time.time() - ts) if isinstance(ts, (int, float)) else -1
         if not (0 <= age <= RESUME_OFFER_MAX_AGE):
             return
-        self.add_sys(f"💬 You have a conversation from {self._age_str(age)} ago. "
-                     "Claude can pick it up where you left off:")
-        at_bottom = self.chat.yview()[1] > 0.999
-        self.chat.insert("end", "\n")
-        self.chat.window_create("end", window=self._resume_btn_widget(str(saved["id"])),
-                                padx=self.px(16), pady=self.px(2))
-        self.chat.insert("end", "\n")
-        if at_bottom:
-            self.chat.see("end")
+        sid = str(saved["id"])
+        v = self._views[0]
+        v._session_id = sid            # so 💬 → Reopen doesn't offer it a second time
+        self.add_sys(f"↺ Restoring your conversation from {self._age_str(age)} ago — "
+                     "press Clear if you'd rather start fresh.")
+        self._set_status("restoring conversation…")
+        v.worker.resume(sid)
+        self._replay_transcript(v, sid)
 
     @staticmethod
     def _age_str(secs):
@@ -2920,72 +3051,87 @@ class Overlay:
             return f"{secs // 3600} h"
         return f"{secs // 86400} d"
 
-    def _resume_btn_widget(self, session_id):
-        """One-click 'Resume last conversation' button embedded in the chat (same
-        embedded-canvas pattern as the CLI-update button, incl. the forwarded wheel).
-        Click asks the worker to relaunch the client with --resume; the outcome comes
-        back as a ('resumed') / ('resume_failed') event that restyles this exact
-        button. Once a NEW conversation starts (first send), the button goes stale —
-        clicking it then would silently discard the messages just exchanged."""
-        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2",
-                      takefocus=0)
-        c._ustate = "idle"                          # idle | working | done | failed | stale
-        st = {"f": None, "w": 0, "h": 0, "rad": 0}  # current-zoom font + box, set by render()
-        labels = {"idle": "↺  Resume last conversation",
-                  "working": "Resuming…",
-                  "done": "✓  Resumed — keep going",
-                  "failed": "⚠  Couldn't resume — this is a fresh session",
-                  "stale": "↺  (a new conversation has started)"}
-
-        def draw(hover=False):
-            c.delete("all")
-            s = c._ustate
-            if s == "idle":
-                bg = T["accent_hi"] if hover else T["accent"]
-                fg = T["on_accent"]
-            elif s == "failed":
-                bg, fg = T["tool_bg"], T["err"]
-            else:                                   # working / done / stale → inert grey
-                bg, fg = T["tool_bg"], T["muted"]
-            round_rect(c, 1, 1, st["w"] - 1, st["h"] - 1, st["rad"], fill=bg, outline="")
-            c.create_text(st["w"] / 2, st["h"] / 2, text=labels[c._ustate], fill=fg,
-                          font=st["f"], anchor="center")
-
-        def render():
-            f = tkfont.Font(root=self.root, font=self.f_small)   # current zoom
-            c._overlay_fonts = [f]                               # keep a ref so Tk won't GC it
-            pad = self.px(11)
-            widest = max(f.measure(v) for v in labels.values())  # widest state → no reflow
-            st.update(f=f, h=self.px(24), rad=self.px(7), w=pad + widest + pad)
-            c.configure(width=st["w"], height=st["h"])
-            draw()
-
-        def set_state(s):
-            c._ustate = s
+    def _replay_transcript(self, v, session_id):
+        """Load a stored conversation's transcript off the UI thread (the SDK reads the
+        CLI's per-directory session .jsonl from disk) and hand it to chat v's queue as a
+        ("replay", messages) event — _poll routes it into v's transcript like any other
+        of its events, so it renders correctly even if the user switched chats."""
+        def bg():
             try:
-                c.configure(cursor="hand2" if s == "idle" else "arrow")
-                draw()
+                msgs = _fetch_session_messages(session_id)
+            except Exception as e:
+                v.ui_q.put(("system", f"(couldn't load the previous transcript: "
+                                      f"{type(e).__name__} — Claude still remembers the "
+                                      f"conversation.)"))
+                return
+            v.ui_q.put(("replay", msgs))
+        threading.Thread(target=bg, daemon=True).start()
+
+    # Replay caps: a marathon session would take seconds to render into Tk and bloat the
+    # widget — show the recent tail; the MODEL still has the full history via resume.
+    _REPLAY_MAX_MSGS = 40
+    _REPLAY_MAX_CHARS = 30_000
+
+    def _render_replay(self, msgs):
+        """Render a restored transcript into the current chat: user bubbles + markdown-
+        rendered replies, visually the conversation the user remembers. Tool-use noise
+        and thinking are skipped (they're process, not conversation)."""
+        pairs = []
+        for m in msgs or []:
+            try:
+                mtype = getattr(m, "type", None)
+                content = (getattr(m, "message", None) or {}).get("content")
             except Exception:
-                pass
-        c._set_ustate = set_state    # let the resumed/resume_failed handlers restyle it
-
-        def on_click(_e):
-            if c._ustate != "idle" or self.busy:
-                return "break"
-            set_state("working")
-            self._set_status("resuming last conversation…")
-            self.worker.resume(session_id)
-            return "break"
-        c._click = on_click          # a named handle so the routing is directly testable
-
-        render()
-        c.bind("<Enter>", lambda e: draw(hover=True))
-        c.bind("<Leave>", lambda e: draw(hover=False))
-        c.bind("<Button-1>", on_click)
-        c.bind("<MouseWheel>", self._fwd_wheel)      # embedded widget must not swallow scroll
-        self._register_zoomable(c, render)
-        self._resume_btn = c
-        return c
+                continue
+            if isinstance(content, str):
+                texts = [content]
+            elif isinstance(content, list):
+                texts = [b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text"]
+            else:
+                texts = []
+            text = "\n".join(t for t in texts if t).strip()
+            if not text or mtype not in ("user", "assistant"):
+                continue
+            if mtype == "user":
+                # CLI-internal records (slash commands like /model and their stdout) are
+                # stored as user messages — process noise, not conversation. Skip them.
+                if "<command-name>" in text or "<local-command-stdout>" in text:
+                    continue
+                # strip the attachment preambles sends prepend ("[Attached: a live
+                # screenshot …]") — they described a moment that isn't on screen anymore
+                text = re.sub(r"^(?:\[Attached:[^\]]*\]\s*)+", "", text).strip()
+                if not text:
+                    text = "(shared a screenshot)"
+            pairs.append((mtype, text))
+        if not pairs:
+            self.add_sys("(the previous transcript is empty — Claude still remembers "
+                         "the conversation.)")
+            return
+        shown = pairs[-self._REPLAY_MAX_MSGS:]
+        keep, total = [], 0
+        for role, text in reversed(shown):
+            total += len(text)
+            if total > self._REPLAY_MAX_CHARS and keep:
+                break
+            keep.append((role, text))
+        keep.reverse()
+        if len(keep) < len(pairs):
+            self.add_sys(f"… earlier messages omitted (showing the last {len(keep)}; "
+                         "Claude remembers all of it).")
+        for role, text in keep:
+            if role == "user":
+                self.add_user(text)
+            else:
+                self.add_delta(text if text.endswith("\n") else text + "\n")
+                self._md_finalize()
+        self._turn_raw = ""              # replayed replies must not grow a Copy button
+        self._turn_copy_added = False
+        self._set_task_badge(any(w.unread for w in self._views))
+        if not self._cur.first_prompt:   # name the chat from its real first message
+            first_user = next((t for r, t in pairs if r == "user"), "")
+            self._cur.first_prompt = first_user[:60]
+        self.add_sys("— restored · keep going —")
 
     def _persist_session(self):
         """Record the current conversation's session id (+ when and where) so the next
@@ -3286,12 +3432,6 @@ class Overlay:
         if text and not self._cur.first_prompt:   # 💬-menu snippet + Reopen-record name
             self._cur.first_prompt = text[:60]
         self.add_user(label)
-        if self._resume_btn is not None:   # a NEW conversation is starting — resuming now
-            try:                           # would silently discard it; retire the offer
-                self._resume_btn._set_ustate("stale")
-            except Exception:
-                pass
-            self._resume_btn = None
         if IMAGE_INPUT == "inline":
             paths = [s["path"] for s in (shots or [])] + list(images)
             self.worker.ask(self._inline_text(text, shots, images), paths)
@@ -3683,7 +3823,6 @@ class Overlay:
         self._forget_recent(self._session_id)   # also gone from 💬 → Reopen
         self._session_id = None
         self._cur.first_prompt = ""      # next send names this (fresh) conversation
-        self._resume_btn = None          # the embedded button was just wiped with the chat
         # Guard the window until the worker confirms the reset (reset_done): a stale
         # (session / turn_done) batch from the turn that was in flight when Clear was
         # clicked would otherwise re-set _session_id and re-persist the discarded record.
@@ -3976,6 +4115,7 @@ class Overlay:
             return
         self._set_status("switching model…")
         self.worker.set_model(val)
+        _save_state(model=val)   # a deliberate choice: new chats + the next launch keep it
 
     def _on_wheel(self, e):
         # Same scroll as before (no "break", so behavior is unchanged) — but timed. Tk
@@ -4167,42 +4307,30 @@ class Overlay:
                 self._session_id = str(payload)
         elif kind == "resumed":
             self._set_status("")
-            if self._resume_btn is not None:
-                try:
-                    self._resume_btn._set_ustate("done")
-                except Exception:
-                    pass
-                self._resume_btn = None
-            self.add_sys("↺ Resumed your last conversation. The transcript isn't "
-                         "replayed here, but Claude remembers it — just keep going.")
+            self.add_sys("↺ Resumed — Claude remembers this conversation; just keep going.")
             self._persist_session()      # keep it resumable even if no new turn follows
         elif kind == "resume_failed":
             self._set_status("")
-            if self._resume_btn is not None:
-                try:
-                    self._resume_btn._set_ustate("failed")
-                except Exception:
-                    pass
-                self._resume_btn = None
-            else:
-                # The offer was already retired (a send or Clear raced the resume outcome),
-                # so the button can't carry the news. Say it in the chat, or the fallback to
-                # a fresh session would be completely silent — the one thing this feature is
-                # meant not to do.
-                self.add_sys("↺ Couldn't resume the previous conversation — this is a "
-                             "fresh session.")
+            # The fallback to a fresh session must never be silent — the one thing this
+            # feature is meant not to do (the replayed transcript above, if any, is then
+            # just a memento; the model doesn't have that context).
+            self.add_err("↺ Couldn't resume the previous conversation — this is a fresh "
+                         "session (the replayed history above is display-only).")
         elif kind == "resume_lost":
             # The connect looked like a resume, but the CLI's first streamed id proves it
             # silently started FRESH (see worker._set_session). Correct the earlier
             # optimistic "resumed" so the user isn't told the context is back when it isn't.
             self.add_err("⚠ The previous conversation couldn't be restored after all — the "
                          "CLI started a fresh session, so earlier context isn't available.")
-            if self._resume_btn is not None:
-                try:
-                    self._resume_btn._set_ustate("failed")
-                except Exception:
-                    pass
-                self._resume_btn = None
+        elif kind == "replay":
+            self._render_replay(payload)
+        elif kind == "voice_text":
+            self._on_voice_text(payload)
+        elif kind == "voice_err":
+            self._voice_busy = False
+            self._set_status("")
+            self._paint_mic()
+            self.add_err(f"🎤 Transcription failed: {payload}")
         elif kind == "compacting":
             self._start_compact_anim()
         elif kind == "compact_done":
@@ -4325,7 +4453,7 @@ class Overlay:
 _CHAT_FIELDS = (
     "busy", "read_only", "_model", "_ctx_pct", "_claude_header", "_thinking_active",
     "_md_tail", "_md_tbl", "_md_fence", "_md_last_scroll", "_turn_raw",
-    "_turn_copy_added", "_session_id", "_resume_btn", "_discard_pending",
+    "_turn_copy_added", "_session_id", "_discard_pending",
     "_compacting", "_compact_line", "_compact_anim_after", "_compact_t0",
     "_compact_frame", "_zoomables", "_sb_first", "_sb_last", "_sb_drag", "_sb_hover",
 )

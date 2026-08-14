@@ -2,8 +2,10 @@
 
 This is the working Jarvis application: a fork of [claude-overlay](https://github.com/shengyanlin/claude-overlay) by shengyanlin (MIT — see [LICENSE](LICENSE)), extended with the Jarvis features:
 
-- **Multiple parallel chats** (💬 in the status bar, Ctrl+N new, Ctrl+Tab cycle) — each chat is its own agent session with its own model, permission mode, context % and transcript; a busy chat keeps streaming in the background while you talk in another. Background replies mark the 💬 button (and the collapsed orb) until you look. Recently-closed conversations can be reopened from the 💬 menu (Claude remembers them; the transcript isn't replayed).
-- **Claude 5 model options** (Fable/Opus/Sonnet/Haiku) in the status-line model switcher, per chat
+- **Multiple parallel chats** (💬 in the status bar, Ctrl+N new, Ctrl+Tab cycle) — each chat is its own agent session with its own model, permission mode, context % and transcript; a busy chat keeps streaming in the background while you talk in another. Background replies mark the 💬 button (and the collapsed orb) until you look.
+- **Conversations survive a restart** — on launch the overlay restores your last conversation, transcript and all, and resumes it so you pick up where you left off (press Clear to start fresh instead). Recently-closed conversations reopen the same way from the 💬 menu.
+- **Voice input** (🎤 in the status bar) — click to record, click again to transcribe; the text lands in the message box for review (never auto-sent), Esc cancels. Fully local (faster-whisper on your CPU — audio never leaves the machine) and bilingual-friendly (language auto-detected per utterance). Optional: `pip install -r requirements-voice.txt`; the speech model (~480 MB for the default `small`) downloads once on first use.
+- **Claude 5 model options** (Fable/Opus/Sonnet/Haiku) in the status-line model switcher, per chat — your last pick is the default for new chats and the next launch
 - **Context folders** — point the assistant at any folder(s) on your machine; contents are read on demand, like attaching context in a chat
 
 Parallel chats default to at most 4 (`MAX_CHATS`) — each one is its own `claude` subprocess, and 2–4 concurrent sessions is the sweet spot on a subscription before rate limits bite.
@@ -19,4 +21,6 @@ setup.cmd                     # one-time: installs Python deps, checks the CLI
 Start Claude Overlay.cmd      # launch
 ```
 
-Settings live in `config.py`, overridable per machine in `%LOCALAPPDATA%\claude-overlay\config.json` (see `_USER_CONFIG_KEYS` in config.py for what's overridable). Notable keys: `PERMISSION_MODE`, `WORKING_DIR`, `CONTEXT_DIRS`, `MODEL`, `MAX_CHATS`, `WINDOW_ALPHA`, `AUTO_SCREENSHOT_DEFAULT`.
+Settings live in `config.py`, overridable per machine in `%LOCALAPPDATA%\claude-overlay\config.json` (see `_USER_CONFIG_KEYS` in config.py for what's overridable). Notable keys: `PERMISSION_MODE`, `WORKING_DIR`, `CONTEXT_DIRS`, `MODEL`, `MAX_CHATS`, `VOICE_MODEL`, `WINDOW_ALPHA`, `AUTO_SCREENSHOT_DEFAULT`.
+
+A note on `WORKING_DIR`: every chat starts *in* that folder — Claude treats it as the project it's working from and may mention it ("your X project") even in unrelated conversations. Point it at a neutral folder if you don't want that.
