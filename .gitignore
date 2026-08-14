@@ -1,0 +1,24 @@
+# Local reference clone of the upstream seed project (not part of this repo)
+claude-overlay/
+
+# Local-only docs (HTML artifact source; the repo version is docs/BLUEPRINT.md)
+docs/jarvis-blueprint.html
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / Tauri (future)
+node_modules/
+dist/
+target/
+
+# Local state, secrets, personal data — never commit
+.env
+*.local.json
+chats/
+*.log
+*.sqlite
+*.db
