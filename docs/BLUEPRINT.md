@@ -123,7 +123,7 @@ Sources: [VPI-Bench](https://arxiv.org/abs/2506.02456) · [Claude Code auto-mode
 
 ## Build phases
 
-1. **Quality of life** (in the seed app while the real codebase starts) — Claude 5 model picker · clipboard/text attach (cheaper than screenshots) · context-folder wiring
+1. **Quality of life** (in the seed app while the real codebase starts) — Claude 5 model picker · context-folder wiring (page/text context attach moved to the browser-extension phase, as a "page context" source selector next to auto-shot)
 2. **Multi-chat supervisor** — session-per-chat with warm pool · sidebar from `list_sessions()` · per-chat profiles — built shell-agnostic so it survives the Tauri move
 3. **Chrome extension for job forms** — native messaging bridge · per-ATS adapters (Greenhouse, Lever, Workday) · approval side panel
 4. **Tauri shell migration** — Rust shell + WebView UI + Python sidecar · port the proven Win32 techniques · installer + signed auto-update · per-state orb transparency

@@ -126,6 +126,7 @@ def _clean_overlay(ov):
         pass
     # View / per-turn state reset() doesn't cover:
     ov.auto_shot = co.AUTO_SCREENSHOT_DEFAULT
+    co.CONTEXT_DIRS.clear()             # tests that attach context folders must not leak them
     ov.window_shot = (co.SHOT_SCOPE == "window")
     ov.share_visible = co.SHOW_IN_SCREEN_SHARE_DEFAULT
     ov.read_only = (co.PERMISSION_MODE == "plan")

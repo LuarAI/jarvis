@@ -266,7 +266,9 @@ def test_ci_is_the_canary_for_new_sdk_releases():
     Pinning the SDK would quietly disable this: CI would test a version no new user would
     ever get. So the pairing is the invariant -- floor plus a CI run against the newest
     release -- and neither half may be removed on its own."""
-    ci = open(os.path.join(ROOT, ".github", "workflows", "tests.yml"),
+    # Jarvis: the app lives in app/ inside the repo, and GitHub only honors workflows
+    # in the REPO-ROOT .github/ — so the canary lives one level up from ROOT (= app/).
+    ci = open(os.path.join(ROOT, "..", ".github", "workflows", "tests.yml"),
               encoding="utf-8").read()
     assert "requirements-dev.txt" in ci, "CI no longer installs from the requirements files"
     assert "preflight.py" in ci, (

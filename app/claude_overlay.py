@@ -1423,11 +1423,16 @@ class Overlay:
         the worker confirms), so the checkmark never claims a lock that isn't live."""
         def row(on, name):
             return ("✓  " + name) if on else ("      " + name)
-        return [
+        items = [
             (row(self.window_shot, "Window-only"), self.toggle_window_shot),
             (row(self.share_visible, "Shareable"), self.toggle_screen_share),
             (row(self.read_only, "Read-only"), self.toggle_read_only),
+            ("      Add context folder…", self.add_context_dir),
         ]
+        if CONTEXT_DIRS:
+            items.append((f"      Forget context folders ({len(CONTEXT_DIRS)})",
+                          self.forget_context_dirs))
+        return items
 
     def _gear_menu(self, e):
         # Same popup pattern as the model switcher (_model_menu): build fresh on each open
@@ -3309,6 +3314,60 @@ class Overlay:
                          "(falls back to full screen when no window is in focus).")
         else:
             self.add_sys("🖥 Screenshots capture all screens again (one image per monitor).")
+
+    def _update_user_config(self, key, value):
+        """Persist one setting into the per-machine config.json (the same file the user
+        edits by hand — see config.USER_CONFIG_FILE). Read-modify-write with a temp file
+        + os.replace like _save_state, and utf-8-sig tolerant like config's own reader,
+        so a Notepad-saved BOM can't make us clobber the user's other settings."""
+        try:
+            data = {}
+            if USER_CONFIG_FILE.is_file():
+                try:
+                    loaded = json.loads(USER_CONFIG_FILE.read_text("utf-8-sig"))
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except Exception:
+                    pass    # unreadable file: preserve-nothing beats crash; config.py
+                            # already warned about it at startup
+            data[key] = value
+            USER_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = USER_CONFIG_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=2), "utf-8")
+            os.replace(tmp, USER_CONFIG_FILE)
+            return True
+        except Exception:
+            return False
+
+    def add_context_dir(self):
+        """Jarvis: pick a folder Claude may READ during sessions (SDK add_dirs). Mutates
+        config.CONTEXT_DIRS in place — worker._make_options reads it at connect time, so
+        the change applies to the NEXT session — and persists it to config.json so it
+        survives a relaunch."""
+        from tkinter import filedialog
+        path = filedialog.askdirectory(parent=self.root,
+                                       title="Choose a folder Claude may read")
+        if not path:
+            return
+        path = os.path.normpath(path)
+        if path in CONTEXT_DIRS:
+            self.add_sys(f"📁 Already attached: {path}")
+            return
+        CONTEXT_DIRS.append(path)
+        saved = self._update_user_config("CONTEXT_DIRS", list(CONTEXT_DIRS))
+        self.add_sys(f"📁 Context folder attached: {path}\n"
+                     "Claude can read files there on demand starting with the next "
+                     "conversation — press Clear to start one now."
+                     + ("" if saved else "\n(⚠ couldn't persist it to config.json — "
+                        "it will be forgotten on relaunch.)"))
+
+    def forget_context_dirs(self):
+        """Drop every attached context folder (in place, same reason as above)."""
+        n = len(CONTEXT_DIRS)
+        CONTEXT_DIRS.clear()
+        self._update_user_config("CONTEXT_DIRS", [])
+        self.add_sys(f"📁 Forgot {n} context folder(s). Applies to the next "
+                     "conversation (press Clear).")
 
     def toggle_read_only(self):
         """Ask the worker to flip between read-only ("plan") and the configured

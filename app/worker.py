@@ -314,6 +314,14 @@ class ClaudeWorker(threading.Thread):
             # Relaunch INTO a previous conversation: the launch-time Resume button, or
             # a reconnect carrying the live session across a dead transport (_reconnect).
             opts["resume"] = self._resume_session_id
+        if CONTEXT_DIRS:
+            # Jarvis context folders: extra directories the agent may read on demand
+            # (config.CONTEXT_DIRS — file or ⚙ menu). Read HERE, at options-build time,
+            # because the ⚙ menu mutates the list object in place: the next connect
+            # (reset/Clear, reconnect) picks the change up with no restart. add_dirs
+            # grants file ACCESS only; nothing is loaded until the model reads a file,
+            # so a huge folder costs zero tokens until actually used.
+            opts["add_dirs"] = list(CONTEXT_DIRS)
         if MCP_SERVERS:
             # The servers the overlay declares for ITSELF (config.MCP_SERVERS, empty by
             # default). Under strict_mcp_config below this is the ONLY way an MCP server
@@ -338,7 +346,7 @@ class ClaudeWorker(threading.Thread):
         # mcp_servers is itself what the SDK rejects.
         droppable = ["strict_mcp_config", "max_buffer_size", "can_use_tool",
                      "include_partial_messages", "skills", "disallowed_tools", "resume",
-                     "mcp_servers"]
+                     "mcp_servers", "add_dirs"]
         self._last_dropped = []
         while True:
             try:

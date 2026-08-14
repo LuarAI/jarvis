@@ -50,7 +50,13 @@ WORKING_DIR = str(Path.home())
 # concrete version each alias resolved to
 # (e.g. "claude-opus-4-8"), so you can always see what you're on.
 MODEL = "opus"   # startup default: the latest Opus family
-MODELS = [("Opus", "opus"), ("Opus (1M)", "opus[1m]"),
+# "Fable" is a CONCRETE id, not an alias: the CLI has no "fable" family alias (verified
+# 2026-08-14 — `claude --model fable -p ok` answers "may not exist"; the concrete id
+# works). Revisit if a future CLI grows the alias; until then this entry won't
+# auto-update the way the alias entries do. Requires a plan entitled to Fable — the CLI
+# reports "no access" per-account, exactly like an unknown model.
+MODELS = [("Fable", "claude-fable-5"),
+          ("Opus", "opus"), ("Opus (1M)", "opus[1m]"),
           ("Sonnet", "sonnet"), ("Haiku", "haiku")]  # click the statusline to switch
 PERMISSION_MODE = "bypassPermissions"
                                  # the STARTUP permission mode; flip it at run time with the
@@ -91,6 +97,15 @@ STRICT_MCP_CONFIG = _env_bool("CLAUDE_OVERLAY_STRICT_MCP", True)
 # exists to avoid, so add servers you actually use.
 MCP_SERVERS: dict = {}
 
+# Context folders (Jarvis): extra directories the agent may READ during a session, on
+# top of WORKING_DIR — the "point Claude at my notes/CV/project folder" feature. Wired to
+# the Agent SDK's add_dirs, so contents are read ON DEMAND (a big folder costs nothing
+# until the model actually opens a file in it). Set per machine in config.json
+# ("CONTEXT_DIRS": ["C:\\path\\one", "..."]) or live via ⚙ → "Add context folder…".
+# The list OBJECT is mutated in place at run time (append/clear) so every
+# `from config import *` importer sees the change; a new value applies to the NEXT
+# session (Clear starts one).
+CONTEXT_DIRS: list = []
 SKILLS = "all"                    # which Agent SDK skills to enable in the overlay. Default None
                                   # means the overlay discovers NO skills (the SDK only wires up
                                   # skill discovery when this is set). A list enables ONLY those
@@ -381,12 +396,29 @@ def _v_dir(v):
     return p if os.path.isdir(p) else _BAD
 
 
+def _v_dir_list(v):
+    """CONTEXT_DIRS: a list of existing directories, each validated like WORKING_DIR.
+    [] is legal (feature off). ONE bad path rejects the whole list rather than silently
+    dropping it — a context folder the user believes is attached but isn't would make
+    the model 'unable to find' files with no visible reason."""
+    if not isinstance(v, list):
+        return _BAD
+    out = []
+    for item in v:
+        good = _v_dir(item)
+        if good is _BAD:
+            return _BAD
+        out.append(good)
+    return out
+
+
 # Which constants config.json may override, and how each value is checked. Deliberately
 # a whitelist: derived/structural values (STATE_FILE, SHOT_DIR, THEMES, MODELS, the
 # MAX_* safety caps…) stay source-only.
 _USER_CONFIG_KEYS = {
     # agent
     "WORKING_DIR": _v_dir,
+    "CONTEXT_DIRS": _v_dir_list,               # extra read-on-demand dirs → SDK add_dirs
     "MODEL": _v_str,
     # "auto" is Claude Code's classifier-reviewed mode: a separate model vets each action
     # before it runs and blocks anything that escalates beyond the request or looks driven

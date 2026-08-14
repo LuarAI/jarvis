@@ -188,12 +188,23 @@ class TestModels:
         # family, so no id may hardcode a version (e.g. "claude-opus-4-8") — that would
         # freeze the overlay on an old model until someone edits this file. Allowed ids
         # are the bare family aliases opus/sonnet/haiku, optionally with a "[1m]" suffix.
+        # Documented exception: families the CLI has NO alias for yet may use a concrete
+        # id (verified empirically per entry in config.py). Currently that's Fable —
+        # `claude --model fable` answers "may not exist" (checked 2026-08-14), so
+        # "claude-fable-5" is the only way to offer it. Drop it from this set the day
+        # the CLI grows a "fable" alias.
+        NO_ALIAS_EXISTS = {"claude-fable-5"}
         for _, model_id in config.MODELS:
             base = model_id.replace("[1m]", "")
-            assert base in ("opus", "sonnet", "haiku"), (
+            assert base in ("opus", "sonnet", "haiku") or base in NO_ALIAS_EXISTS, (
                 f"MODELS id {model_id!r} is not a bare family alias — it won't auto-update "
-                f"to new model releases. Use 'opus'/'sonnet'/'haiku' (optionally '[1m]')."
+                f"to new model releases. Use 'opus'/'sonnet'/'haiku' (optionally '[1m]'), "
+                f"or document a no-alias exception here AND in config.py."
             )
+
+    def test_models_contains_fable(self):
+        # Jarvis: the Claude 5 flagship must be offered in the switcher.
+        assert "claude-fable-5" in [model_id for _, model_id in config.MODELS]
 
 
 # ---------------------------------------------------------------------------
