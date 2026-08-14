@@ -191,16 +191,70 @@ def round_rect(c, x1, y1, x2, y2, r, **kw):
     return c.create_polygon(pts, smooth=True, **kw)
 
 
+class ChatView:
+    """Jarvis multi-chat: everything that belongs to ONE conversation — its worker
+    (own ClaudeWorker thread → own SDK client → own `claude` subprocess), its event
+    queue, its transcript widgets, and every piece of per-turn render state that used
+    to live directly on Overlay. Overlay delegates those attribute names to the view
+    it is currently rendering (`Overlay._cur`, see the property block after the class),
+    so the ~30 render methods keep reading/writing `self._md_tail` etc. unchanged."""
+
+    def __init__(self, num, worker, ui_q):
+        self.num = num                  # creation ordinal → default name "Chat N"
+        self.name = f"Chat {num}"
+        self.unread = False             # a background reply finished here since last viewed
+        self.first_prompt = ""          # first user message (menu snippet + resume record name)
+        self.draft = ""                 # entry text parked while another chat is active
+        self.last_zoom = None           # zoom the embedded canvases were last rendered at
+        self.worker = worker
+        self.ui_q = ui_q
+        self.wrap = None                # set by Overlay._make_chat_widgets (needs the Tk root)
+        self.chat = None
+        self.scrollbar = None
+        # custom-scrollbar state (per Text widget)
+        self._sb_first, self._sb_last = 0.0, 1.0
+        self._sb_drag = None
+        self._sb_hover = False
+        # per-conversation runtime state — the fields Overlay delegates (see _CHAT_FIELDS)
+        self.busy = False
+        self.read_only = False          # set by the creator from _startup_permission_mode
+        self._model = None
+        self._ctx_pct = None
+        self._claude_header = False
+        self._thinking_active = False
+        self._md_tail = ""
+        self._md_tbl = None
+        self._md_fence = False
+        self._md_last_scroll = 0.0
+        self._turn_raw = ""
+        self._turn_copy_added = False
+        self._session_id = None
+        self._resume_btn = None
+        self._discard_pending = False
+        self._compacting = False
+        self._compact_line = False
+        self._compact_anim_after = None
+        self._compact_t0 = 0.0
+        self._compact_frame = 0
+        self._zoomables = []
+
+
 class Overlay:
     def __init__(self):
-        self.ui_q: "queue.Queue" = queue.Queue()
         _ensure_shot_dir()          # before the worker, so a bad TEMP can't crash us mid-startup
-        # Resolve the remembered Read-only toggle BEFORE the worker exists: the session
-        # must be LAUNCHED in the remembered mode (a plan-launched session can't be
-        # elevated to bypassPermissions at run time, only started in it).
-        self.read_only, _launch_mode = _startup_permission_mode()
-        self.worker = ClaudeWorker(self.ui_q, permission_mode=_launch_mode)
-        self.worker.start()
+        # Multi-chat: per-conversation state lives on ChatView objects. `_active` is the
+        # chat the user is looking at; `_cur` is the chat currently being RENDERED — they
+        # differ only inside _poll while a background chat's events are being drained
+        # (single Tk thread, so user handlers always run with _cur == _active).
+        self._views: list = []
+        self._chat_seq = 0
+        # Events that belong to the APP, not to any one conversation (pasted-image results,
+        # precapture, update checks): background threads must not put these through the
+        # delegated `self.ui_q` (which view that resolves to mid-_poll is a race).
+        self._app_q: "queue.Queue" = queue.Queue()
+        v = self._new_chat_state()      # chat 1: state + worker now, widgets in _build_chat
+        self._views.append(v)
+        self._active = self._cur = v
 
         self.auto_shot = AUTO_SCREENSHOT_DEFAULT
         self.window_shot = (SHOT_SCOPE == "window")   # True → capture only the active window
@@ -224,26 +278,11 @@ class Overlay:
         self._orb_imgs: dict = {}       # (size, hover) → PhotoImage cache for the orb
         self._send_imgs: dict = {}      # (diameter, state) → PhotoImage cache for the send button
         self._send_hover = False
-        self.busy = False
         self.visible = True
         self.expanded = True
         self._toggle_request = False
-        self._model = None
-        self._ctx_pct = None
-        self._claude_header = False
-        self._thinking_active = False   # a thinking block is open in the current turn
-        # streaming-Markdown renderer state (per turn): the current unfinished answer line
-        # (re-rendered live so inline emphasis lands the moment its closing marker streams in),
-        # a table being assembled across lines, and whether we're inside a ``` code fence.
-        self._md_tail = ""
-        self._md_tbl = None
-        self._md_fence = False
-        self._md_last_scroll = 0.0   # throttle yview()/see() — both are O(line) on a giant line
-        # "Copy message" support: accumulate the raw streamed answer text for the current turn
-        # so each message's Copy button can snapshot it. _turn_copy_added guards against the
-        # several turn_done/result events emitting more than one button per assistant turn.
-        self._turn_raw = ""
-        self._turn_copy_added = False
+        # (busy / model / context% / markdown-stream / turn-copy state are per-chat now —
+        #  they live on ChatView and reach here via the delegated properties.)
         self._last_pump = time.monotonic()   # hang-watchdog heartbeat
         self._pump_logged = 0.0              # throttle the periodic "pump alive" debug line
         self._drag = (0, 0)
@@ -254,15 +293,6 @@ class Overlay:
         self._update_available = None     # set to the newer version string if one exists
         self._cli_update_shown = False    # show the "CLI is out of date" notice at most once/session
         self._cli_update_btn_ref = None   # the in-chat Update button, so its result can restyle it
-        self._session_id = None           # the CLI's id for the current conversation (worker
-                                          # events); persisted per completed turn so the NEXT
-                                          # launch can offer to resume — see _persist_session
-        self._resume_btn = None           # the in-chat "Resume last conversation" button while
-                                          # it's still actionable, so events can restyle it
-        self._discard_pending = False     # True from a Clear click until the worker's reset_done
-                                          # drains: a turn's (session / turn_done) batch already
-                                          # queued before the click must not re-set _session_id or
-                                          # re-persist the record and resurrect the discarded chat
         self._restarting = False          # guard: one self-restart (relaunch + quit) at a time
         self._mapping = False             # re-entrancy guard for the <Map> taskbar re-assert
         self._fronting = False            # re-entrancy guard for _raise_to_front (focus churn)
@@ -290,19 +320,119 @@ class Overlay:
                                           # clipped collapsed window; None → plain orb sprite/ellipse
         self._task_done_badge = False     # show a "stage complete" badge on the collapsed orb after
                                           # a reply finishes while collapsed; cleared on expand/new turn
-        # /compact: a context-summarization pass driven by sending the CLI's `/compact` command.
-        # While it runs we animate a one-line banner in the chat (mirrors the CLI's compaction
-        # spinner) — REAL Text content rewritten in place, so it wraps + zooms — then rewrite
-        # that same line as the result.
-        self._compacting = False
-        self._compact_line = False        # True while the animated/result line exists in the chat
-        self._compact_anim_after = None   # pending animation timer id
-        self._compact_t0 = 0.0            # monotonic start (for the elapsed-seconds counter)
-        self._compact_frame = 0
 
         self._build()
         self._register_hotkey()
         self.root.after(60, self._poll)
+
+    # ── multi-chat: creating / switching / closing conversations ──
+    def _new_chat_state(self):
+        """A fresh ChatView with its own worker (started) and event queue — no widgets yet
+        (chat 1 is created before the Tk root exists; _make_chat_widgets attaches them)."""
+        self._chat_seq += 1
+        ro, launch_mode = _startup_permission_mode()
+        q: "queue.Queue" = queue.Queue()
+        w = ClaudeWorker(q, permission_mode=launch_mode)
+        v = ChatView(self._chat_seq, w, q)
+        v.read_only = ro
+        w.start()
+        return v
+
+    def new_chat(self):
+        """⚙-less path to a parallel conversation (💬 menu / Ctrl+N): its own agent session
+        alongside the others — the busy one keeps streaming in its own transcript."""
+        if len(self._views) >= MAX_CHATS:
+            self.add_sys(f"💬 Chat limit reached ({MAX_CHATS} parallel chats). Close one "
+                         "(💬 menu → Close), or raise MAX_CHATS in config.json.")
+            return None
+        v = self._new_chat_state()
+        self._views.append(v)
+        self._make_chat_widgets(v)
+        self.switch_chat(v)
+        self.add_sys(f"✦ {v.name} — a fresh conversation. Your other chats keep running; "
+                     "switch with the 💬 menu or Ctrl+Tab.")
+        self._refresh_chats_chip()
+        return v
+
+    def switch_chat(self, v):
+        """Bring another chat to the front: park the entry draft, swap the transcript
+        frame, restore that chat's draft + chrome (busy label, model line, gear lock)."""
+        if v is self._active or v not in self._views:
+            return
+        prev = self._active
+        prev.draft = "" if self._ph_active else self.entry.get("1.0", "end").rstrip("\n")
+        prev.wrap.pack_forget()
+        self._active = self._cur = v
+        v.unread = False
+        v.wrap.pack(fill="both", expand=True)
+        self.entry.delete("1.0", "end")
+        self._ph_active = False
+        if v.draft:
+            self.entry.configure(fg=T["text"])
+            self.entry.insert("1.0", v.draft)
+        else:
+            self._ph_in()
+        # chrome that reflects the ACTIVE chat
+        self._refresh_send()
+        self.busy_lbl.configure(text="thinking…" if v.busy else "")
+        self._refresh_statusline()
+        self._paint_gear()
+        self._refresh_chats_chip()
+        self._sb_redraw()
+        if v.last_zoom != self.zoom:       # zoom changed while this chat was in the back —
+            self._rezoom_embeds()          # its fixed-size embeds (bubbles/chips) catch up
+            v.last_zoom = self.zoom
+        try:
+            self.chat.see("end")
+        except Exception:
+            pass
+
+    def close_chat(self):
+        """Close the ACTIVE chat (💬 menu). Its agent session ends; the transcript is
+        gone from the UI but the conversation stays resumable (💬 → Reopen) as long as
+        a turn completed. The last remaining chat can't be closed — that's Clear."""
+        v = self._active
+        if len(self._views) <= 1:
+            self.add_sys("💬 This is the only chat — use Clear to start over.")
+            return
+        idx = self._views.index(v)
+        target = self._views[idx - 1] if idx > 0 else self._views[1]
+        self.switch_chat(target)
+        self._views.remove(v)
+        if v._compact_anim_after is not None:
+            try:
+                self.root.after_cancel(v._compact_anim_after)
+            except Exception:
+                pass
+        try:
+            v.worker.interrupt()
+            v.worker.shutdown()
+        except Exception:
+            pass
+        try:
+            v.wrap.destroy()
+        except Exception:
+            pass
+        self._refresh_chats_chip()
+
+    def _cycle_chat(self, e=None, step=1):
+        """Ctrl+Tab / Ctrl+Shift+Tab: next / previous chat, in creation order."""
+        if len(self._views) > 1:
+            i = self._views.index(self._active)
+            self.switch_chat(self._views[(i + step) % len(self._views)])
+        return "break"
+
+    def _run_as(self, v, fn):
+        """Run fn with the render target pinned to view v — for after() callbacks owned by
+        a chat (the compaction animation), which would otherwise fire against whatever chat
+        is active by the time the timer lands. No-op if the chat was closed meanwhile."""
+        if v not in self._views:
+            return
+        self._cur = v
+        try:
+            fn()
+        finally:
+            self._cur = self._active
 
     def px(self, v):
         return int(round(v * self.s))
@@ -332,9 +462,8 @@ class Overlay:
         self.zoom = 1.0
         self._fonts = []   # (Font, base_logical_size) → reconfigured live on Ctrl +/-
         # Embedded canvases (user bubbles, tool chips, tables, Copy buttons) are fixed-size and
-        # draw with their own font, so they don't track the shared fonts. Register each with its
-        # render() here so a zoom can redraw it at the new size (see _rezoom_embeds).
-        self._zoomables = []
+        # draw with their own font, so they don't track the shared fonts. Each is registered
+        # with its render() (per chat — _zoomables lives on ChatView) so a zoom can redraw it.
         self._rezoom_after = None
         def mk(fam, base, **k):
             f = tkfont.Font(family=fam, size=-self.px(base), **k)
@@ -377,6 +506,14 @@ class Overlay:
         self._build_orb()          # collapsed bubble (hidden until "—")
         self._build_edges()        # invisible drag strips on every edge/corner → resize
         self._bind_zoom()          # Ctrl +/- and Ctrl+wheel → live text zoom
+        # Multi-chat keys (Slack/browser conventions): Ctrl+Tab cycles, Ctrl+N opens.
+        self.root.bind("<Control-Tab>", self._cycle_chat)
+        self.root.bind("<Control-Shift-Tab>", lambda e: self._cycle_chat(e, -1))
+        self.root.bind("<Control-n>", lambda e: (self.new_chat(), "break")[1])
+        self.root.bind("<Control-N>", lambda e: (self.new_chat(), "break")[1])
+        # The Text class binds Ctrl+N to cursor-down; bind on the entry too, with break.
+        self.entry.bind("<Control-n>", lambda e: (self.new_chat(), "break")[1])
+        self.entry.bind("<Control-N>", lambda e: (self.new_chat(), "break")[1])
         self._intro()
         # A remembered Read-only choice silently overriding the config default is a
         # SAFETY state — say so up front, so a launch never surprises.
@@ -465,7 +602,7 @@ class Overlay:
                 latest = max((self._parse_ver(t.get("name", "")) for t in tags[:MAX_UPDATE_TAGS]
                               if isinstance(t, dict)), default=None)
                 if latest and latest > self._parse_ver(__version__):
-                    self.ui_q.put(("update", ".".join(map(str, latest))))
+                    self._app_q.put(("update", ".".join(map(str, latest))))
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
@@ -483,7 +620,7 @@ class Overlay:
                 from cliupdate import check_update
                 info = check_update()
                 if info and info.get("behind"):
-                    self.ui_q.put(("cli_update", info))
+                    self._app_q.put(("cli_update", info))
             except Exception:
                 pass
         threading.Thread(target=work, name="cli-update-check", daemon=True).start()
@@ -830,63 +967,78 @@ class Overlay:
         self._update_title_hint()          # named → hide hint; cleared → show it again
 
     def _build_chat(self):
-        wrap = tk.Frame(self.root, bg=T["bg"])
-        wrap.pack(fill="both", expand=True, side="top")
-        self.chat_wrap = wrap
+        # Multi-chat: one shared container frame stays packed in the root; each chat's own
+        # (Text + scrollbar) frame swaps inside it — a single always-on-top window with per-
+        # conversation frames, never N floating windows (which fight over z-order).
+        self.chat_area = tk.Frame(self.root, bg=T["bg"])
+        self.chat_area.pack(fill="both", expand=True, side="top")
+        self._sb_w = self.px(11)
+        v = self._views[0]
+        self._make_chat_widgets(v)
+        v.wrap.pack(fill="both", expand=True)
+        v.last_zoom = self.zoom
+
+    def _make_chat_widgets(self, v):
+        """Build one chat's transcript frame (Text + custom scrollbar) into the shared
+        chat_area. Bindings go to the same Overlay methods as always — those read/write the
+        delegated per-chat fields, and user events only ever fire on the visible (= active)
+        chat, so the delegation resolves to the right view."""
+        wrap = tk.Frame(self.chat_area, bg=T["bg"])
+        v.wrap = wrap
         # Custom thin scrollbar on the right edge: a draggable grey thumb that also shows where
         # you are in the transcript. Drawn on a Canvas to match the app's look, and (crucially)
         # it's a wheel-independent way to scroll — useful because hovering an embedded widget can
         # still swallow the mouse wheel.
-        self._sb_w = self.px(11)
-        self._sb_first, self._sb_last = 0.0, 1.0
-        self._sb_drag = None
-        self._sb_hover = False
-        self.scrollbar = tk.Canvas(wrap, width=self._sb_w, bg=T["bg"], highlightthickness=0,
-                                   cursor="arrow", takefocus=0)
+        sb = tk.Canvas(wrap, width=self._sb_w, bg=T["bg"], highlightthickness=0,
+                       cursor="arrow", takefocus=0)
+        v.scrollbar = sb
         # inset by the resize-edge thickness (px 6) so the right-edge resize strip (which is
         # lifted on top) doesn't sit over the bar and steal its drag.
-        self.scrollbar.pack(side="right", fill="y", padx=(0, self.px(6)))
-        self.scrollbar.bind("<ButtonPress-1>", self._sb_press)
-        self.scrollbar.bind("<B1-Motion>", self._sb_motion)
-        self.scrollbar.bind("<ButtonRelease-1>", lambda e: (setattr(self, "_sb_drag", None), self._sb_redraw()))
-        self.scrollbar.bind("<Configure>", lambda e: self._sb_redraw())
-        self.scrollbar.bind("<MouseWheel>", self._fwd_wheel)
-        self.scrollbar.bind("<Enter>", lambda e: (setattr(self, "_sb_hover", True), self._sb_redraw()))
-        self.scrollbar.bind("<Leave>", lambda e: (setattr(self, "_sb_hover", False), self._sb_redraw()))
-        self.chat = tk.Text(
+        sb.pack(side="right", fill="y", padx=(0, self.px(6)))
+        sb.bind("<ButtonPress-1>", self._sb_press)
+        sb.bind("<B1-Motion>", self._sb_motion)
+        sb.bind("<ButtonRelease-1>", lambda e: (setattr(self, "_sb_drag", None), self._sb_redraw()))
+        sb.bind("<Configure>", lambda e: self._sb_redraw())
+        sb.bind("<MouseWheel>", self._fwd_wheel)
+        sb.bind("<Enter>", lambda e: (setattr(self, "_sb_hover", True), self._sb_redraw()))
+        sb.bind("<Leave>", lambda e: (setattr(self, "_sb_hover", False), self._sb_redraw()))
+        chat = tk.Text(
             wrap, bg=T["bg"], fg=T["text"], bd=0, padx=self.px(18), pady=self.px(12),
             wrap="word", font=self.f_body, highlightthickness=0, cursor="arrow",
             width=1, height=1, selectbackground=T["sel"], selectforeground=T["text"],
             spacing1=self.px(2), spacing3=self.px(3),
         )
-        self.chat.pack(side="left", fill="both", expand=True)
-        self.chat.configure(yscrollcommand=self._sb_set)
-        self.chat.bind("<MouseWheel>", self._on_wheel)
-        self.chat.bind("<Key>", self._readonly_keys)
-        self.chat.bind("<Configure>", self._on_chat_configure, add="+")
+        v.chat = chat
+        chat.pack(side="left", fill="both", expand=True)
+        chat.configure(yscrollcommand=self._sb_set)
+        chat.bind("<MouseWheel>", self._on_wheel)
+        chat.bind("<Key>", self._readonly_keys)
+        chat.bind("<Configure>", self._on_chat_configure, add="+")
+        self._configure_chat_tags(chat)
 
+    def _configure_chat_tags(self, chat):
         m = self.f_body.measure("0") * 5
-        self.chat.tag_configure("uh", foreground=T["muted"], font=self.f_chip,
+        chat.tag_configure("uh", foreground=T["muted"], font=self.f_chip,
                                 spacing1=self.px(12), lmargin1=m, lmargin2=m, justify="right")
-        self.chat.tag_configure("user", background=T["user_card"], foreground=T["text"],
+        chat.tag_configure("user", background=T["user_card"], foreground=T["text"],
                                 lmargin1=m, lmargin2=m, rmargin=self.px(2),
                                 spacing1=self.px(6), spacing3=self.px(8))
-        self.chat.tag_configure("ah", foreground=T["accent"], font=self.f_chip,
+        chat.tag_configure("ah", foreground=T["accent"], font=self.f_chip,
                                 spacing1=self.px(16), spacing3=self.px(2))
-        self.chat.tag_configure("a", foreground=T["text"], spacing2=self.px(2))
-        self.chat.tag_configure("tool", foreground=T["muted"], font=self.f_mono,
+        chat.tag_configure("a", foreground=T["text"], spacing2=self.px(2))
+        chat.tag_configure("tool", foreground=T["muted"], font=self.f_mono,
                                 background=T["tool_bg"], lmargin1=self.px(18), lmargin2=self.px(30),
                                 spacing1=self.px(4), spacing3=self.px(4), rmargin=self.px(14))
-        self.chat.tag_configure("sys", foreground=T["faint"], font=self.f_small,
+        chat.tag_configure("sys", foreground=T["faint"], font=self.f_small,
                                 spacing1=self.px(6), spacing3=self.px(4))
-        self.chat.tag_configure("err", foreground=T["err"], font=self.f_small,
+        chat.tag_configure("err", foreground=T["err"], font=self.f_small,
                                 spacing1=self.px(6), spacing3=self.px(4))
         # extended-thinking: a muted "✻ thinking" label + faint italic body, indented so it
         # reads as a side-channel before the answer (mirrors how the CLI streams thinking, so
         # the long pre-answer wait isn't a dead, frozen-looking screen).
-        self.chat.tag_configure("think_label", foreground=T["faint"], font=self.f_chip,
+        chat.tag_configure("think_label", foreground=T["faint"], font=self.f_chip,
                                 lmargin1=self.px(18), spacing1=self.px(8), spacing3=self.px(2))
-        self.chat.tag_configure("think", foreground=T["faint"], font=self.f_think,
+        chat.tag_configure("think", foreground=T["faint"], font=self.f_think,
                                 lmargin1=self.px(18), lmargin2=self.px(18), rmargin=self.px(14),
                                 spacing2=self.px(1))
         # Markdown styling for the answer. These tags layer ON TOP of "a" (which owns the
@@ -894,16 +1046,16 @@ class Overlay:
         # font/background options they conflict on, the md_* tag wins while "a" still supplies
         # the colour — i.e. a range tagged ("a", "md_b") keeps the answer colour but renders bold.
         code_bg = T["tool_bg"]
-        self.chat.tag_configure("md_b", font=self.f_bold)
-        self.chat.tag_configure("md_i", font=self.f_ital)
-        self.chat.tag_configure("md_code", font=self.f_code, background=code_bg)
-        self.chat.tag_configure("md_h1", font=self.f_h1, spacing1=self.px(14), spacing3=self.px(5))
-        self.chat.tag_configure("md_h2", font=self.f_h2, spacing1=self.px(11), spacing3=self.px(4))
-        self.chat.tag_configure("md_h3", font=self.f_h3, spacing1=self.px(9), spacing3=self.px(3))
-        self.chat.tag_configure("md_bullet", lmargin1=self.px(20), lmargin2=self.px(36))
-        self.chat.tag_configure("md_quote", font=self.f_ital, foreground=T["muted"],
+        chat.tag_configure("md_b", font=self.f_bold)
+        chat.tag_configure("md_i", font=self.f_ital)
+        chat.tag_configure("md_code", font=self.f_code, background=code_bg)
+        chat.tag_configure("md_h1", font=self.f_h1, spacing1=self.px(14), spacing3=self.px(5))
+        chat.tag_configure("md_h2", font=self.f_h2, spacing1=self.px(11), spacing3=self.px(4))
+        chat.tag_configure("md_h3", font=self.f_h3, spacing1=self.px(9), spacing3=self.px(3))
+        chat.tag_configure("md_bullet", lmargin1=self.px(20), lmargin2=self.px(36))
+        chat.tag_configure("md_quote", font=self.f_ital, foreground=T["muted"],
                                 lmargin1=self.px(20), lmargin2=self.px(20))
-        self.chat.tag_configure("md_codeblock", font=self.f_code, background=code_bg,
+        chat.tag_configure("md_codeblock", font=self.f_code, background=code_bg,
                                 lmargin1=self.px(20), lmargin2=self.px(20), rmargin=self.px(14),
                                 spacing1=self.px(1), spacing3=self.px(1))
 
@@ -1010,6 +1162,15 @@ class Overlay:
         self.gear.bind("<Enter>", lambda e: self.gear.configure(fg=T["accent"]))
         self.gear.bind("<Leave>", lambda e: self._paint_gear())
         self._paint_gear()
+        # Multi-chat: the 💬 button opens the chat switcher (parallel conversations). It
+        # shows the count once there's more than one, and turns accent when a background
+        # chat finished a reply (its "unread" dot lives in the menu rows).
+        self.chats_btn = tk.Label(st, text="💬", bg=T["bg"], fg=T["muted"],
+                                  font=self.f_small, cursor="hand2")
+        self.chats_btn.pack(side="left", padx=(self.px(8), self.px(2)), pady=pad)
+        self.chats_btn.bind("<Button-1>", self._chats_menu)
+        self.chats_btn.bind("<Enter>", lambda e: self.chats_btn.configure(fg=T["accent"]))
+        self.chats_btn.bind("<Leave>", lambda e: self._refresh_chats_chip())
         self.attach_lbl = tk.Label(st, text="", bg=T["bg"], fg=T["accent"],
                                    font=self.f_small, cursor="hand2")
         self.attach_lbl.pack(side="left", padx=self.px(6), pady=pad)
@@ -1399,8 +1560,8 @@ class Overlay:
         # per-toggle text on the bar; instead it turns the accent color while Read-only is
         # ON, so that safety lock stays visible without opening the menu. Guarded so the
         # paint helpers below are safe to call before the gear exists / in headless tests.
-        if not hasattr(self, "gear"):
-            return
+        if not hasattr(self, "gear") or self._cur is not self._active:
+            return                      # a background chat's mode change repaints on switch
         self.gear.configure(fg=(T["accent"] if self.read_only else T["muted"]))
 
     # Window-only / Shareable / Read-only moved into the ⚙ menu; their state is shown by
@@ -1445,6 +1606,77 @@ class Overlay:
             m.tk_popup(e.x_root, e.y_root)
         finally:
             m.grab_release()
+
+    # ── 💬 multi-chat menu ──
+    def _chats_items(self):
+        """The (label, command) rows of the 💬 chat switcher. Split out from _chats_menu
+        (like _gear_items) so it's unit-testable without popping a real Tk menu.
+        ✓ marks the active chat; ● marks a background chat with a finished reply."""
+        items = []
+        for v in self._views:
+            mark = "✓ " if v is self._active else ("● " if v.unread else "    ")
+            busy = "  ⋯" if (v.busy and v is not self._active) else ""
+            snip = (v.first_prompt or "").strip().replace("\n", " ")
+            label = f"{mark}{v.name}" + (f" — {snip[:32]}" if snip else "") + busy
+            items.append((label, (lambda vv=v: self.switch_chat(vv))))
+        items.append(("＋  New chat   (Ctrl+N)", self.new_chat))
+        if len(self._views) > 1:
+            items.append(("✕  Close this chat", self.close_chat))
+        for rec in self._recent_choices():
+            age = self._age_str(time.time() - rec["ts"]) if isinstance(rec.get("ts"), (int, float)) else "?"
+            name = (rec.get("name") or "conversation").strip()[:32]
+            items.append((f"↺  Reopen: {name}  ({age} ago)",
+                          (lambda r=rec: self.reopen_session(r))))
+        return items
+
+    def _chats_menu(self, e):
+        m = tk.Menu(self.root, tearoff=0, bg=T["field"], fg=T["text"],
+                    activebackground=T["accent"], activeforeground=T["on_accent"], bd=0)
+        for lbl, cmd in self._chats_items():
+            m.add_command(label=lbl, command=cmd)
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def _refresh_chats_chip(self):
+        """The 💬 button shows the chat count (once >1) and turns accent while any
+        background chat has an unread finished reply."""
+        if not hasattr(self, "chats_btn"):
+            return
+        n = len(self._views)
+        unread = any(v.unread for v in self._views)
+        self.chats_btn.configure(text=("💬" if n == 1 else f"💬 {n}"),
+                                 fg=(T["accent"] if unread else T["muted"]))
+
+    def _recent_choices(self, limit=4):
+        """Recently-persisted sessions that are NOT already open in a chat — offered in
+        the 💬 menu as one-click reopens (a fresh chat + the SDK's resume). Same-machine,
+        same working dir only (the CLI stores sessions per directory)."""
+        open_ids = {v._session_id for v in self._views if v._session_id}
+        out = []
+        for rec in _load_state().get("recent_sessions", []):
+            if not (isinstance(rec, dict) and rec.get("id")):
+                continue
+            if rec["id"] in open_ids or rec.get("cwd") != WORKING_DIR:
+                continue
+            out.append(rec)
+            if len(out) >= limit:
+                break
+        return out
+
+    def reopen_session(self, rec):
+        """💬 → Reopen: a new chat whose worker immediately resumes the recorded session.
+        The transcript isn't replayed (same contract as the launch-time resume offer),
+        but Claude remembers the conversation — the resumed/resume_failed events land in
+        the new chat like any other."""
+        v = self.new_chat()
+        if v is None:
+            return
+        v.first_prompt = (rec.get("name") or "").strip()
+        v._session_id = str(rec["id"])   # so _recent_choices hides it while it's open
+        self._set_status("resuming conversation…")
+        v.worker.resume(str(rec["id"]))
 
     # ── rounded input layout ──
     def _layout_input(self, e=None):
@@ -1612,7 +1844,7 @@ class Overlay:
         except BaseException:
             pass
         finally:
-            self.ui_q.put(("attach", (out, failed)))
+            self._app_q.put(("attach", (out, failed)))
 
     def _stash_image(self, src):
         """Save a clipboard image (or a copy of a pasted image file) into SHOT_DIR,
@@ -1754,6 +1986,7 @@ class Overlay:
         except Exception:
             pass
         self._rezoom_embeds()      # redraw embedded canvases (bubbles/chips/tables/Copy) at new zoom
+        self._active.last_zoom = self.zoom   # background chats re-render on their next switch-in
 
     @staticmethod
     def _widget_alive(w):
@@ -2011,7 +2244,8 @@ class Overlay:
         self._md_finalize()              # commit the previous turn's last line before a new bubble
         self._turn_raw = ""              # a new turn starts → fresh assistant-answer buffer
         self._turn_copy_added = False
-        self._set_task_badge(False)      # a new task → clear any stale "done" badge on the orb
+        # a new task → clear the "done" badge, unless another chat still has unread news
+        self._set_task_badge(any(v.unread for v in self._views))
         at_bottom = self.chat.yview()[1] > 0.999
         self.chat.insert("end", "\n")
         self.chat.window_create("end", window=self._user_bubble(text), pady=self.px(3))
@@ -2756,10 +2990,26 @@ class Overlay:
     def _persist_session(self):
         """Record the current conversation's session id (+ when and where) so the next
         launch can offer to resume it. Called per completed turn — cheap (a tiny JSON
-        write) and crash-safe: whatever the last finished turn was, that's resumable."""
-        if self._session_id:
-            _save_state(last_session={"id": self._session_id, "ts": time.time(),
-                                      "cwd": WORKING_DIR})
+        write) and crash-safe: whatever the last finished turn was, that's resumable.
+        Multi-chat: also upsert into recent_sessions, the 💬 → Reopen list (capped, most
+        recent first, one entry per session id)."""
+        if not self._session_id:
+            return
+        rec = {"id": self._session_id, "ts": time.time(), "cwd": WORKING_DIR,
+               "name": (self._cur.first_prompt or "").strip()[:60]}
+        recents = [r for r in _load_state().get("recent_sessions", [])
+                   if isinstance(r, dict) and r.get("id") != rec["id"]]
+        _save_state(last_session={"id": rec["id"], "ts": rec["ts"], "cwd": rec["cwd"]},
+                    recent_sessions=([rec] + recents)[:8])
+
+    def _forget_recent(self, session_id):
+        """Drop one session from the 💬 → Reopen list (a Cleared conversation was
+        deliberately discarded — offering it back would resurrect it)."""
+        if not session_id:
+            return
+        recents = [r for r in _load_state().get("recent_sessions", [])
+                   if isinstance(r, dict) and r.get("id") != session_id]
+        _save_state(recent_sessions=recents)
 
     def _show_cli_update_notice(self, info):
         """Render the 'CLI is behind' notice + a one-click Update button in the chat. Shown at
@@ -2837,7 +3087,7 @@ class Overlay:
                         ok, msg = run_update()
                     except Exception as e:
                         ok, msg = False, type(e).__name__
-                    self.ui_q.put(("cli_update_result", (bool(ok), str(msg))))
+                    self._app_q.put(("cli_update_result", (bool(ok), str(msg))))
                 threading.Thread(target=work, name="cli-update", daemon=True).start()
             elif c._ustate == "done":                   # after a successful update → restart now
                 self._restart_overlay()
@@ -3033,6 +3283,8 @@ class Overlay:
         label = text if text else "(look at my screens)"
         if n:
             label += (f"   🖼×{n}" if n > 1 else "   🖼")
+        if text and not self._cur.first_prompt:   # 💬-menu snippet + Reopen-record name
+            self._cur.first_prompt = text[:60]
         self.add_user(label)
         if self._resume_btn is not None:   # a NEW conversation is starting — resuming now
             try:                           # would silently discard it; retire the offer
@@ -3104,7 +3356,7 @@ class Overlay:
         except BaseException:
             shots = None
         finally:
-            self.ui_q.put(("precapture_done", shots))
+            self._app_q.put(("precapture_done", shots))
 
     def _build_prompt(self, text, shots, images=None):
         parts = []
@@ -3417,7 +3669,8 @@ class Overlay:
         self._zoomables = []             # all embedded canvases were just destroyed with the text
         self._turn_raw = ""              # drop the assistant-answer buffer + its Copy-button guard
         self._turn_copy_added = False
-        self._set_task_badge(False)      # fresh conversation → drop any "task done" badge
+        self._set_task_badge(any(v.unread for v in self._views))   # fresh conversation → drop
+                                         # the "done" badge unless another chat is unread
         self._claude_header = False
         self._thinking_active = False    # don't carry a half-open thinking block into the new turn
         # Clear the shown % immediately so the OLD conversation's usage can't linger while the
@@ -3427,7 +3680,9 @@ class Overlay:
         self._refresh_statusline()
         # Clear = deliberate discard: forget the session AND its persisted record, so
         # the next launch can't offer to resume a conversation the user threw away.
+        self._forget_recent(self._session_id)   # also gone from 💬 → Reopen
         self._session_id = None
+        self._cur.first_prompt = ""      # next send names this (fresh) conversation
         self._resume_btn = None          # the embedded button was just wiped with the chat
         # Guard the window until the worker confirms the reset (reset_done): a stale
         # (session / turn_done) batch from the turn that was in flight when Clear was
@@ -3559,15 +3814,33 @@ class Overlay:
             self._show_window()
 
     # ── status / busy ──
+    # The status widgets (busy label, send button, statusline) are SHARED chrome that must
+    # reflect the ACTIVE chat — so each guard skips the widget write when the event being
+    # handled belongs to a background chat (its state is still recorded on its ChatView,
+    # and switch_chat repaints the chrome from that state).
     def _set_status(self, text):
-        self.busy_lbl.configure(text=text)
+        if self._cur is self._active:
+            self.busy_lbl.configure(text=text)
 
     def _set_busy(self, busy):
-        self.busy = busy
-        self._refresh_send()
-        self.busy_lbl.configure(text="thinking…" if busy else "")
+        self.busy = busy                     # delegated → recorded on the owning chat
+        if self._cur is self._active:
+            self._refresh_send()
+            self.busy_lbl.configure(text="thinking…" if busy else "")
+
+    def _mark_unread_if_background(self, always=False):
+        """A turn just ended in the chat being rendered: if that chat isn't the one on
+        screen, dot it in the 💬 menu/chip (only when it produced something, unless a
+        failure forces it)."""
+        if self._cur is self._active:
+            return
+        if always or (self._turn_raw or "").strip():
+            self._cur.unread = True
+            self._refresh_chats_chip()
 
     def _refresh_statusline(self):
+        if self._cur is not self._active:
+            return                           # background chat's model/ctx% → shown on switch
         p = f"{self._ctx_pct:.0f}%" if isinstance(self._ctx_pct, (int, float)) else "—"
         # version goes last so it clips first if the window is narrow; ⬆ flags an update
         ver = f"v{__version__}" + ("  ⬆" if self._update_available else "")
@@ -3619,7 +3892,10 @@ class Overlay:
         except tk.TclError:
             return                        # line/mark gone (chat cleared) → stop quietly
         self._compact_frame = i + 1
-        self._compact_anim_after = self.root.after(110, self._compact_tick)
+        # Pin the timer to THIS chat: by the time it fires the user may be viewing another
+        # chat, and an unpinned callback would animate into the wrong transcript.
+        self._compact_anim_after = self.root.after(
+            110, lambda v=self._cur: self._run_as(v, self._compact_tick))
 
     def _stop_compact_anim(self, payload):
         self._compacting = False
@@ -3763,42 +4039,44 @@ class Overlay:
         if DEBUG_LOG and (self._last_pump - getattr(self, "_pump_logged", 0.0)) > 10.0:
             self._pump_logged = self._last_pump
             try:
-                dbg("pump", "alive q=%d busy=%s" % (self.ui_q.qsize(), getattr(self, "busy", False)))
+                qtotal = self._app_q.qsize() + sum(v.ui_q.qsize() for v in self._views)
+                dbg("pump", "alive q=%d chats=%d busy=%s"
+                    % (qtotal, len(self._views), getattr(self, "busy", False)))
             except Exception:
                 pass
         deadline = time.monotonic() + 0.012   # ~12ms budget per tick, so the drain can never
         handled = 0                            # monopolize Tk: a fast stream yields back for
-        pending_delta = []                     # repaint / clicks / hotkey between slices.
-        pending_think = []                     # thinking tokens, coalesced the same way
+                                               # repaint / clicks / hotkey between slices.
 
-        def flush_delta():
-            if pending_delta:
-                joined = "".join(pending_delta)
-                pending_delta.clear()
-                try:
-                    self._handle("delta", joined)
-                except Exception:
-                    pass
+        def drain(q):
+            # Drain one queue, coalescing adjacent delta/think runs into single inserts.
+            # Coalescing is PER QUEUE (= per chat): two chats streaming at once must never
+            # interleave their text into one buffer.
+            nonlocal handled
+            pending_delta = []
+            pending_think = []
 
-        def flush_think():
-            if pending_think:
-                joined = "".join(pending_think)
-                pending_think.clear()
-                try:
-                    self._handle("think", joined)
-                except Exception:
-                    pass
+            def flush_delta():
+                if pending_delta:
+                    joined = "".join(pending_delta)
+                    pending_delta.clear()
+                    try:
+                        self._handle("delta", joined)
+                    except Exception:
+                        pass
 
-        try:
-            if self._toggle_request:
-                self._toggle_request = False
-                try:
-                    self.toggle_visible()
-                except Exception:
-                    pass
+            def flush_think():
+                if pending_think:
+                    joined = "".join(pending_think)
+                    pending_think.clear()
+                    try:
+                        self._handle("think", joined)
+                    except Exception:
+                        pass
+
             while handled < 400 and time.monotonic() < deadline:
                 try:
-                    kind, payload = self.ui_q.get_nowait()
+                    kind, payload = q.get_nowait()
                 except queue.Empty:
                     break
                 handled += 1
@@ -3819,15 +4097,40 @@ class Overlay:
                     except Exception:
                         pass
             flush_think(); flush_delta()
+
+        try:
+            if self._toggle_request:
+                self._toggle_request = False
+                try:
+                    self.toggle_visible()
+                except Exception:
+                    pass
+            # App-level events first (paste results, update notices) — always rendered
+            # against the chat the user is looking at.
+            self._cur = self._active
+            drain(self._app_q)
+            # Then every chat's own stream, each rendered into ITS transcript. The active
+            # chat drains first (lowest perceived latency), background chats after.
+            for v in [self._active] + [w for w in self._views if w is not self._active]:
+                if handled >= 400 or time.monotonic() >= deadline:
+                    break
+                self._cur = v
+                drain(v.ui_q)
         except Exception:
             pass
         finally:
+            self._cur = self._active           # user handlers always run against the active chat
+            try:
+                more = (not self._app_q.empty()) or any(not v.ui_q.empty() for v in self._views)
+            except Exception:
+                more = False
             # If we left messages behind (hit the budget), come back fast; otherwise idle.
-            self.root.after(1 if not self.ui_q.empty() else 60, self._poll)
+            self.root.after(1 if more else 60, self._poll)
 
     def _handle(self, kind, payload):
         if kind == "ready":
-            self.busy_lbl.configure(text="")
+            if self._cur is self._active:
+                self.busy_lbl.configure(text="")
             self._refresh_statusline()
         elif kind == "reset_done":
             self._discard_pending = False   # worker confirmed the wipe: stale events, if any,
@@ -3855,6 +4158,7 @@ class Overlay:
             self._finish_turn_copy()     # then a Copy button under the reply
             self._set_busy(False)
             self._maybe_flag_done()      # badge the orb if this finished while collapsed
+            self._mark_unread_if_background()   # a background chat finished → 💬 dot
             if not self._discard_pending:
                 self._persist_session()  # this conversation is now the resumable one
                                          # (skipped for a turn Cleared mid-flight)
@@ -3906,6 +4210,7 @@ class Overlay:
         elif kind == "error":
             self.add_err(str(payload))
             self._set_busy(False)
+            self._mark_unread_if_background(always=True)   # a failed background turn needs eyes too
         elif kind == "result":
             self._md_finalize()          # finalize before any error line is appended
             self._finish_turn_copy()     # Copy button under whatever reply text we did get
@@ -3913,6 +4218,7 @@ class Overlay:
             # our side; surface it WITH the CLI's reason (subtype/result) instead of a generic line.
             if isinstance(payload, dict) and payload.get("is_error"):
                 self.add_err(self._format_turn_error(payload))
+                self._mark_unread_if_background(always=True)
             self._set_busy(False)
         elif kind == "attach":          # background paste finished (paths, failed_count)
             self._paste_busy = False
@@ -3954,6 +4260,30 @@ class Overlay:
         self._claude_header = True
 
     # ── shutdown ──
+    def _shutdown_workers(self):
+        """Ask every chat's worker to interrupt + disconnect, then wait for all of them
+        against ONE shared deadline (not 3 s each — quit must stay snappy with 4 chats).
+        Interrupt/shutdown are queued for all workers FIRST so they wind down in
+        parallel; the joins then just collect them."""
+        for v in self._views:
+            try:
+                v.worker.interrupt()     # stop any in-flight turn so it can close cleanly
+            except Exception:
+                pass
+            try:
+                v.worker.shutdown()
+            except Exception:
+                pass
+        # Let the workers disconnect their agents before we tear down. If Claude is
+        # mid-turn (running a command or editing your open document), a hard kill
+        # could interrupt that write — so wait, but bounded so quit never hangs.
+        deadline = time.monotonic() + 3.0
+        for v in self._views:
+            try:
+                v.worker.join(timeout=max(0.1, deadline - time.monotonic()))
+            except Exception:
+                pass
+
     def quit(self):
         if self._quitting:        # idempotent: a rapid double-close must not destroy() twice
             return
@@ -3963,18 +4293,7 @@ class Overlay:
                 self._keyboard.unhook_all()
         except Exception:
             pass
-        try:
-            self.worker.interrupt()      # stop any in-flight turn so it can close cleanly
-        except Exception:
-            pass
-        self.worker.shutdown()
-        # Let the worker disconnect the agent before we tear down. If Claude is
-        # mid-turn (running a command or editing your open document), a hard kill
-        # could interrupt that write — so wait, but bounded so quit never hangs.
-        try:
-            self.worker.join(timeout=3.0)
-        except Exception:
-            pass
+        self._shutdown_workers()
         try:
             self.root.destroy()
         except Exception:
@@ -3995,6 +4314,39 @@ class Overlay:
 
     def run(self):
         self.root.mainloop()
+
+
+# ── multi-chat delegation ──────────────────────────────────────────────────────────
+# Every per-conversation field the render/worker paths touch lives on ChatView; Overlay
+# exposes each name as a property that reads/writes the CURRENT render target (_cur).
+# This keeps the ~30 render methods (and the tests, and conftest's baseline reset)
+# byte-identical while N chats each keep their own copy. _cur == _active except inside
+# _poll while a background chat's events are being drained, and inside _run_as.
+_CHAT_FIELDS = (
+    "busy", "read_only", "_model", "_ctx_pct", "_claude_header", "_thinking_active",
+    "_md_tail", "_md_tbl", "_md_fence", "_md_last_scroll", "_turn_raw",
+    "_turn_copy_added", "_session_id", "_resume_btn", "_discard_pending",
+    "_compacting", "_compact_line", "_compact_anim_after", "_compact_t0",
+    "_compact_frame", "_zoomables", "_sb_first", "_sb_last", "_sb_drag", "_sb_hover",
+)
+# Per-chat objects that are read but never assigned through Overlay:
+_CHAT_READONLY = ("chat", "scrollbar", "worker", "ui_q")
+
+
+def _install_chat_delegates():
+    def rw(name):
+        return property(lambda self: getattr(self._cur, name),
+                        lambda self, val: setattr(self._cur, name, val))
+    for _f in _CHAT_FIELDS:
+        setattr(Overlay, _f, rw(_f))
+    for _f in _CHAT_READONLY:
+        setattr(Overlay, _f, property(lambda self, n=_f: getattr(self._cur, n)))
+    # chat_wrap kept as an alias for the shared container: toggle_collapse packs/unpacks
+    # it exactly like the old single chat frame, and per-chat wraps live inside it.
+    Overlay.chat_wrap = property(lambda self: self.chat_area)
+
+
+_install_chat_delegates()
 
 
 def _selfheal_taskbar_shortcut():

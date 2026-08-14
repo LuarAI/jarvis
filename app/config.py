@@ -106,6 +106,12 @@ MCP_SERVERS: dict = {}
 # `from config import *` importer sees the change; a new value applies to the NEXT
 # session (Clear starts one).
 CONTEXT_DIRS: list = []
+MAX_CHATS = 4                     # cap on parallel chats (each is its own agent session — its own
+                                  # `claude` subprocess). Anthropic's own guidance puts 2–4 parallel
+                                  # sessions as the sweet spot on a subscription; more mostly buys
+                                  # rate-limit stalls, and many long-lived processes sharing one
+                                  # login can race the OAuth token refresh. Raise in config.json
+                                  # (up to 12) if your plan takes it.
 SKILLS = "all"                    # which Agent SDK skills to enable in the overlay. Default None
                                   # means the overlay discovers NO skills (the SDK only wires up
                                   # skill discovery when this is set). A list enables ONLY those
@@ -430,6 +436,7 @@ _USER_CONFIG_KEYS = {
     # reaches worker._allow_tool, so the blanket approve there cannot undo it.
     # Requires a recent model (Haiku is not supported) and an account with auto mode enabled.
     "PERMISSION_MODE": _v_choice("bypassPermissions", "acceptEdits", "default", "plan", "auto"),
+    "MAX_CHATS": _v_num(1, 12, int),
     "SKILLS": _v_skills,                       # "all" | ["name", …] | null
     "STRICT_MCP_CONFIG": _v_bool,
     "MCP_SERVERS": _v_mcp_servers,             # {name: {...}} — loads even under strict

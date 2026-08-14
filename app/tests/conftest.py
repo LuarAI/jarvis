@@ -116,6 +116,17 @@ def _clean_overlay(ov):
             ov.toggle_collapse()        # back to expanded
     except Exception:
         pass
+    # Multi-chat baseline: close every chat a prior test opened, back to just chat 1.
+    try:
+        while len(ov._views) > 1:
+            ov.switch_chat(ov._views[-1])
+            ov.close_chat()
+        ov._views[0].unread = False
+        ov._views[0].first_prompt = ""
+        ov._views[0].draft = ""
+        ov._refresh_chats_chip()
+    except Exception:
+        pass
     try:
         ov.reset()                      # clears chat + md state + badge + compact banner
     except Exception:
