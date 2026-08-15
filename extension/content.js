@@ -151,7 +151,64 @@
     return { fields, excluded_counts: excluded };
   }
 
+  /* LinkedIn's jobs UI is a two-pane SPA: a list of <li> cards on the left and the
+   * selected posting on the right. A whole-body innerText dump buries the posting
+   * under nav chrome, and the cards' text is a soup of aria labels and "Easy Apply"
+   * badges. So extract it structurally: the open posting in full, plus a compact
+   * index of the visible cards (title · company · location · flags). */
+  function linkedinJobs() {
+    if (!/linkedin\.com/.test(location.hostname)) return null;
+    const t = (n) => (n && (n.innerText || "")).replace(/\s+/g, " ").trim();
+    const out = [];
+
+    const detail = document.querySelector(
+      ".jobs-search__job-details, .jobs-details, .job-view-layout, #job-details");
+    if (detail && t(detail).length > 200) {
+      out.push("=== OPEN POSTING ===", (detail.innerText || "").replace(/\n{3,}/g, "\n\n").trim());
+    }
+
+    // Both the <li> and the .job-card-container inside it match, so dedupe by job id
+    // (without this every posting was listed twice).
+    const seen = new Set();
+    const cards = Array.from(
+      document.querySelectorAll("li[data-occludable-job-id], .job-card-container")
+    ).filter((c) => {
+      const key = c.getAttribute("data-occludable-job-id") || c.getAttribute("data-job-id");
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (cards.length) {
+      const rows = [];
+      for (const c of cards.slice(0, 40)) {
+        const link = c.querySelector("a.job-card-container__link, a.job-card-list__title--link");
+        const title = (link && (link.getAttribute("aria-label") || t(link))) || "";
+        const company = t(c.querySelector(".artdeco-entity-lockup__subtitle"));
+        const place = t(c.querySelector(".job-card-container__metadata-wrapper, .artdeco-entity-lockup__caption"));
+        const foot = t(c.querySelector(".job-card-container__footer-wrapper"));
+        const href = link && link.getAttribute("href");
+        const id = c.getAttribute("data-occludable-job-id")
+          || (c.getAttribute("data-job-id") || "");
+        const active = c.querySelector('[aria-current="page"]') || c.matches('[aria-current="page"]')
+          || c.querySelector(".jobs-search-results-list__list-item--active");
+        if (!title) continue;
+        rows.push(`${active ? "▶ " : "- "}${title}` +
+                  (company ? ` — ${company}` : "") +
+                  (place ? ` (${place})` : "") +
+                  (foot ? ` [${foot}]` : "") +
+                  (id ? ` #${id}` : "") +
+                  (href ? `\n    https://www.linkedin.com${href.split("?")[0]}` : ""));
+      }
+      if (rows.length) {
+        out.push("", `=== JOB LIST (${rows.length} shown; ▶ = currently open) ===`, rows.join("\n"));
+      }
+    }
+    return out.length ? out.join("\n") : null;
+  }
+
   function pageText(limit) {
+    const special = linkedinJobs();
+    if (special) return special.slice(0, limit || 20000);
     const clone = document.body ? document.body.cloneNode(true) : null;
     if (!clone) return "";
     clone.querySelectorAll("script,style,noscript,svg,nav,footer,aside,[aria-hidden='true']")

@@ -363,6 +363,15 @@ class TestArmedTabNote:
         assert "Senior Dev at Acme" in note and "greenhouse.io" in note
         assert "browser_read_page" in note
 
+    def test_note_distinguishes_pinned_from_merely_open(self, overlay, monkeypatch):
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
+        monkeypatch.setattr(overlay.bridge, "request", lambda a, p=None, timeout=None: {
+            "ok": True, "armed": True, "pinned": True, "title": "T", "url": "https://x.test"})
+        assert "pinned" in overlay._armed_tab_note()
+        monkeypatch.setattr(overlay.bridge, "request", lambda a, p=None, timeout=None: {
+            "ok": True, "armed": True, "pinned": False, "title": "T", "url": "https://x.test"})
+        assert "open in front of them" in overlay._armed_tab_note()
+
     def test_no_note_when_nothing_armed(self, overlay, monkeypatch):
         self._armed(overlay, monkeypatch, armed=False)
         assert overlay._armed_tab_note() == ""
@@ -387,7 +396,7 @@ class TestArmedTabNote:
         overlay._send_or_stop()
         sent = [a for (n, a) in overlay.worker.calls if n == "ask"][0][0]
         assert sent.startswith("is this worth applying to?")
-        assert "armed a browser tab" in sent
+        assert "Browser:" in sent and "Senior Dev at Acme" in sent
 
 
 # ── deleting conversations from the ☰ list ───────────────────────────────────

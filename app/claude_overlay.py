@@ -1823,9 +1823,10 @@ class Overlay:
                 return ""
             title = str(res.get("title") or "").strip()[:120]
             url = str(res.get("url") or "").strip()[:300]
-            return (f"\n\n[The user has armed a browser tab for you: \"{title}\" — {url}. "
-                    "If this message relates to that page, call browser_read_page to see "
-                    "it (its text and form fields) instead of asking them to paste it.]")
+            how = "pinned for you" if res.get("pinned") else "open in front of them"
+            return (f"\n\n[Browser: the user has a page {how} — \"{title}\" — {url}. "
+                    "If this message relates to it, call browser_read_page to see it "
+                    "(text and form fields) instead of asking them to paste anything.]")
         except Exception:
             return ""
 
@@ -4376,12 +4377,15 @@ class Overlay:
     def _web_chip_click(self, _e=None):
         res = self.bridge.request("armed_status", timeout=3.0) if self.bridge else {}
         if isinstance(res, dict) and res.get("armed"):
-            self.add_sys(f"🌐 Armed tab: {res.get('title') or ''}\n{res.get('url') or ''}\n"
-                         "Just ask about it — I'll read it automatically.")
+            how = ("📌 Pinned" if res.get("pinned") else "Currently open")
+            self.add_sys(f"🌐 {how}: {res.get('title') or ''}\n{res.get('url') or ''}\n"
+                         "Just ask about it — I'll read it automatically. Ctrl+Shift+J "
+                         "in Chrome pins a tab so I keep reading it even while you "
+                         "browse elsewhere.")
         else:
-            self.add_sys("🌐 Chrome extension connected, but no tab is armed. Press "
-                         "Ctrl+Shift+J on the page you want me to see (or click the "
-                         "Jarvis toolbar icon).")
+            self.add_sys("🌐 Chrome extension connected, but I can't see a usable tab. "
+                         "Open a normal web page (not chrome:// or the Web Store) and "
+                         "try again.")
 
     # ── compaction animation (mirrors the Claude Code CLI's /compact spinner) ──
     def _start_compact_anim(self):

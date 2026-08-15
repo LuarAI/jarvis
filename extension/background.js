@@ -14,19 +14,35 @@ const HOST = "com.jarvis.host";
 let port = null;
 let backoff = 1000;
 
+/* Armed-tab state lives in chrome.storage.LOCAL, not .session: session storage is
+ * wiped when the extension reloads or the browser restarts, while the toolbar badge
+ * is not — so the badge said ON while the stored id was already gone, and Jarvis
+ * reported "no tab armed" on a tab the user had clearly armed. Local storage keeps
+ * the two in agreement; a stale id is validated (and cleared) on use. */
 async function armedTabId() {
-  const { armedTabId } = await chrome.storage.session.get("armedTabId");
+  const { armedTabId } = await chrome.storage.local.get("armedTabId");
   return armedTabId || null;
 }
 
 async function setArmed(tabId, note) {
-  await chrome.storage.session.set({ armedTabId: tabId });
+  await chrome.storage.local.set({ armedTabId: tabId || null });
   try {
     await chrome.action.setBadgeText({ text: tabId ? "ON" : "" });
     await chrome.action.setBadgeBackgroundColor({ color: "#6c5ce7" });
   } catch (e) { /* badge is cosmetic */ }
   send({ type: "event", event: "tab_armed", tabId, note: note || "" });
 }
+
+/* Re-paint the badge for whatever tab the user is looking at: the badge is
+ * per-extension (global), so without this a restored armed id shows ON on every
+ * tab, and a lost one shows nothing on the right tab. */
+async function repaintBadge(activeTabId) {
+  const armed = await armedTabId();
+  try {
+    await chrome.action.setBadgeText({ text: (armed && armed === activeTabId) ? "ON" : "" });
+  } catch (e) { /* cosmetic */ }
+}
+chrome.tabs.onActivated.addListener(({ tabId }) => repaintBadge(tabId));
 
 function connect() {
   try {
@@ -117,40 +133,54 @@ async function askFrames(tabId, msg) {
   return { fields, page_text, url, title, ats, excluded_counts: excluded };
 }
 
+/* Which tab does Jarvis act on?
+ *
+ * The pinned (armed) tab if there is a live one — that's the user saying "this
+ * specific page, even while I browse elsewhere". Otherwise the tab they're
+ * actually looking at. Requiring an explicit arm for every read turned out to be
+ * the wrong contract: users read "Jarvis Bridge ON" as "it can see my browser",
+ * and being told to arm a tab they had already armed is just wrong. Filling still
+ * cannot happen without the approval card, so this widens READ convenience, not
+ * the ability to act. chrome:// and Web Store pages are unscriptable — skip them
+ * so we fail with a useful message rather than a permissions error. */
+const UNSCRIPTABLE = /^(chrome|edge|about|devtools|view-source):|^https:\/\/chromewebstore\.google\.com|^https:\/\/chrome\.google\.com\/webstore/;
+
+async function targetTab() {
+  const pinnedId = await armedTabId();
+  if (pinnedId) {
+    try {
+      const t = await chrome.tabs.get(pinnedId);
+      if (t && !UNSCRIPTABLE.test(t.url || "")) { t._pinned = true; return t; }
+    } catch (e) {
+      await setArmed(null);        // it was closed — stop claiming it's armed
+    }
+  }
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (active && !UNSCRIPTABLE.test(active.url || "")) { active._pinned = false; return active; }
+  return null;
+}
+
 async function handle(msg) {
   const id = msg.id;
   const reply = (payload) => send(Object.assign({ id }, payload));
   try {
     if (msg.action === "ping") { reply({ ok: true, pong: true }); return; }
     if (msg.action === "armed_status") {
-      const tid = await armedTabId();
-      if (!tid) { reply({ ok: true, armed: false }); return; }
-      try {
-        const t = await chrome.tabs.get(tid);
-        reply({ ok: true, armed: true, url: t.url, title: t.title });
-      } catch (e) {
-        await setArmed(null);
-        reply({ ok: true, armed: false });
-      }
+      const t = await targetTab();
+      if (!t) { reply({ ok: true, armed: false }); return; }
+      reply({ ok: true, armed: true, url: t.url, title: t.title, pinned: t._pinned });
       return;
     }
 
-    let tabId = await armedTabId();
-    if (!tabId) {
-      // Fall back to the active tab of the last focused window, but only report it
-      // as a hint — the user still has to arm a tab for actions to run.
-      reply({ ok: false, error: "No tab is armed. In Chrome, open the page and press "
-                              + "Ctrl+Shift+J (or click the Jarvis toolbar icon) to give "
-                              + "Jarvis access to that tab." });
+    const target = await targetTab();
+    if (!target) {
+      reply({ ok: false, error: "No usable tab. Open the page in Chrome (Jarvis can't "
+                              + "read chrome:// pages, the Web Store, or PDF viewers), "
+                              + "then try again." });
       return;
     }
-    let tab;
-    try { tab = await chrome.tabs.get(tabId); }
-    catch (e) {
-      await setArmed(null);
-      reply({ ok: false, error: "The armed tab was closed. Arm another one with Ctrl+Shift+J." });
-      return;
-    }
+    const tabId = target.id;
+    const tab = target;
     if (msg.action === "read_page" || msg.action === "list_fields" || msg.action === "fill_fields") {
       const res = await askFrames(tabId, msg);
       if (res.error) { reply({ ok: false, error: res.error }); return; }
