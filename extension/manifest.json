@@ -14,11 +14,11 @@
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_title": "Jarvis: arm this tab" },
+  "action": { "default_title": "Jarvis: pin this tab" },
   "commands": {
     "arm-tab": {
-      "suggested_key": { "default": "Ctrl+Shift+J" },
-      "description": "Arm the current tab for Jarvis"
+      "suggested_key": { "default": "Alt+Shift+J" },
+      "description": "Pin the current tab for Jarvis"
     }
   }
 }

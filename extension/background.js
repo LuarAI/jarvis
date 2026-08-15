@@ -5,9 +5,9 @@
  * (Chrome 105+), so the link stays up without keepalive hacks; if the port drops
  * we reconnect with backoff.
  *
- * The overlay addresses ONE tab: the "armed" tab. Arming is a deliberate user
- * action in the browser (toolbar click or Ctrl+Shift+J) — the overlay can never
- * point itself at a tab you didn't hand it.
+ * Jarvis reads the tab the user is looking at; the toolbar button / Alt+Shift+J
+ * PINS a specific tab so it keeps reading that one while they browse elsewhere.
+ * Acting (filling) always goes through the overlay's approval card regardless.
  */
 
 const HOST = "com.jarvis.host";
@@ -83,25 +83,35 @@ async function askFrames(tabId, msg) {
     if (frames && frames.length) frameIds = frames.map((f) => f.frameId);
   } catch (e) { /* no webNavigation permission / restricted page → top frame only */ }
 
-  // Make sure the content script is present everywhere (a page loaded before the
-  // extension was installed has none).
-  try {
-    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content.js"] });
-  } catch (e) { /* injection blocked on some frames; the declared script may still be there */ }
-
-  const per = await Promise.all(frameIds.map(async (frameId) => {
+  /* Ask a frame, injecting the content script first if it isn't there.
+   *
+   * Injection is PER FRAME: an allFrames:true executeScript rejects the whole call
+   * as soon as one frame is restricted (LinkedIn is full of cross-origin ad iframes),
+   * which meant the retry never ran and a page whose declared script hadn't loaded
+   * looked permanently unreachable ("the connection to that tab is stale"). */
+  async function askFrame(frameId) {
     try {
       const r = await chrome.tabs.sendMessage(tabId, msg, { frameId });
-      return r && r.ok ? { frameId, r } : null;
-    } catch (e) {
-      return null;   // frame has no content script (about:blank, cross-origin ad) — skip
-    }
-  }));
-  const live = per.filter(Boolean);
+      if (r && r.ok) return { frameId, r };
+    } catch (e) { /* no content script here yet — inject and retry below */ }
+    try {
+      await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] },
+                                             files: ["content.js"] });
+      const r = await chrome.tabs.sendMessage(tabId, msg, { frameId });
+      if (r && r.ok) return { frameId, r };
+    } catch (e) { /* restricted frame (ad, about:blank, cross-origin) — skip it */ }
+    return null;
+  }
+
+  const per = await Promise.all(frameIds.map(askFrame));
+  let live = per.filter(Boolean);
+  if (!live.length && !frameIds.includes(0)) {
+    const top = await askFrame(0);            // last resort: the top frame explicitly
+    if (top) live = [top];
+  }
   if (!live.length) {
-    return { error: "Couldn't reach the page. Reload the tab, then press Ctrl+Shift+J "
-                  + "again (Chrome can't inject into chrome:// pages, the Web Store, or "
-                  + "PDF viewers)." };
+    return { error: "Couldn't reach the page — try reloading the tab. (Chrome can't "
+                  + "read chrome:// pages, the Web Store, or PDF viewers at all.)" };
   }
 
   if (msg.action === "fill_fields") {

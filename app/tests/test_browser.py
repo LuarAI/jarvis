@@ -250,7 +250,7 @@ class TestSystemPromptMentionsBrowser:
         # Without this the model never calls the tools — it falls back to screenshots
         # or asks the user to paste the page (the bug this test locks down).
         assert "browser_read_page" in p and "browser_fill_form" in p
-        assert "Ctrl+Shift+J" in p
+        assert "Alt+Shift+J" in p
         assert "untrusted" in p.lower()
         assert "never claim you" in p.lower()
 

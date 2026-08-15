@@ -4379,7 +4379,7 @@ class Overlay:
         if isinstance(res, dict) and res.get("armed"):
             how = ("📌 Pinned" if res.get("pinned") else "Currently open")
             self.add_sys(f"🌐 {how}: {res.get('title') or ''}\n{res.get('url') or ''}\n"
-                         "Just ask about it — I'll read it automatically. Ctrl+Shift+J "
+                         "Just ask about it — I'll read it automatically. Alt+Shift+J "
                          "in Chrome pins a tab so I keep reading it even while you "
                          "browse elsewhere.")
         else:
@@ -4747,7 +4747,7 @@ class Overlay:
         elif kind == "fill_result":
             self._on_fill_result(payload[0], payload[1])
         elif kind == "browser_connected":
-            self.add_sys("🌐 Chrome extension connected. Arm a tab with Ctrl+Shift+J "
+            self.add_sys("🌐 Chrome extension connected. Arm a tab with Alt+Shift+J "
                          "(or the Jarvis toolbar button), then ask me to read the page. "
                          "New chats can use it right away; a chat that was already open "
                          "needs Clear first.")

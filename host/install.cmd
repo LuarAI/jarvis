@@ -43,6 +43,6 @@ echo     manifest : %MANIFEST%
 echo     extension: %~1
 echo.
 echo   Now: restart Chrome, make sure Jarvis is running, open a job page and press
-echo   Ctrl+Shift+J to arm that tab. Then ask Jarvis to read the page.
+echo   Alt+Shift+J to arm that tab. Then ask Jarvis to read the page.
 echo.
 endlocal

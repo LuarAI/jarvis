@@ -22,12 +22,14 @@ Chrome 136+ blocks external automation (CDP/`--remote-debugging`) of your real, 
 ## Using it
 
 1. Open the job posting / form in Chrome.
-2. Press **Ctrl+Shift+J** (or click the Jarvis toolbar icon) to **arm that tab**. The icon shows `ON`. This is the consent step: Jarvis can only touch a tab you armed.
-3. In Jarvis, ask for what you want:
+2. In Jarvis, just ask — it reads **the tab you're looking at**:
    - *"What does this job ask for?"* → it reads the page
    - *"Fill this application from my CV"* → it proposes values
+3. Optional: press **Alt+Shift+J** (or click the Jarvis toolbar icon) to **pin** that tab — the icon shows `ON` and Jarvis keeps reading that page even while you browse elsewhere. Press it again on another tab to move the pin.
 4. Jarvis shows **every proposed field and value** with **Fill** / **Cancel**. Nothing is typed until you click Fill.
 5. Review the page and **submit it yourself** — Jarvis never submits forms.
+
+> Note: form filling requires Read-only to be **off** (⚙ menu). With Read-only on, Jarvis will read pages and tell you what it *would* fill, but won't offer the Fill card.
 
 ## What it can and can't touch
 
@@ -52,7 +54,8 @@ Chrome 136+ blocks external automation (CDP/`--remote-debugging`) of your real, 
 
 ## Troubleshooting
 
-- **"No tab is armed"** — press Ctrl+Shift+J on the tab you want.
+- **"Couldn't reach the page"** — reload the tab. Chrome cannot read `chrome://` pages, the Web Store, or PDF viewers at all.
+- **The shortcut opens DevTools** — you're on an older build: the pin shortcut is **Alt+Shift+J** (Ctrl+Shift+J is Chrome's own DevTools binding and can't be overridden). Reload the extension. You can rebind it at `chrome://extensions/shortcuts`.
 - **"Jarvis isn't running"** — start the overlay; the proxy finds it via `%LOCALAPPDATA%\Jarvis\ipc.json`.
 - **Nothing connects** — check the extension ID in `host/com.jarvis.host.json` matches `chrome://extensions`, then restart Chrome. Host errors go to Chrome's log (`chrome://extensions` → the extension's "service worker" link → Console).
 - **A field wouldn't fill** — some sites (Workday especially) use custom dropdowns; Jarvis reports which fields failed so you can finish them by hand.
