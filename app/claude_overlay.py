@@ -4311,8 +4311,12 @@ class Overlay:
         p = f"{self._ctx_pct:.0f}%" if isinstance(self._ctx_pct, (int, float)) else "—"
         # version goes last so it clips first if the window is narrow; ⬆ flags an update
         ver = f"v{__version__}" + ("  ⬆" if self._update_available else "")
+        # 🌐 while the Chrome extension is connected, so "can it see my browser?" is
+        # answerable at a glance instead of by asking and getting a guess.
+        web = "   ·   🌐" if getattr(self, "bridge", None) and self.bridge.connected else ""
         self.statusline.configure(
-            text=f"{self._model or 'Claude'} ▾   ·   context {p}   ·   {ver}", fg=T["muted"])
+            text=f"{self._model or 'Claude'} ▾   ·   context {p}{web}   ·   {ver}",
+            fg=T["muted"])
 
     # ── compaction animation (mirrors the Claude Code CLI's /compact spinner) ──
     def _start_compact_anim(self):
@@ -4675,9 +4679,13 @@ class Overlay:
             self._on_fill_result(payload[0], payload[1])
         elif kind == "browser_connected":
             self.add_sys("🌐 Chrome extension connected. Arm a tab with Ctrl+Shift+J "
-                         "(or the Jarvis toolbar button), then ask me to read the page.")
+                         "(or the Jarvis toolbar button), then ask me to read the page. "
+                         "New chats can use it right away; a chat that was already open "
+                         "needs Clear first.")
+            self._refresh_statusline()
         elif kind == "browser_disconnected":
             self._pending_fill = None      # a proposal can't outlive its browser session
+            self._refresh_statusline()
         elif kind == "voice_text":
             self._on_voice_text(payload)
         elif kind == "voice_err":

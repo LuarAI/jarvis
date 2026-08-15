@@ -261,6 +261,16 @@ class ClaudeWorker(threading.Thread):
         except Exception as e:
             self.ui.put(("error", f"set_model failed: {type(e).__name__}: {e}"))
 
+    # The browser tools that only READ (the SDK namespaces in-process MCP tools as
+    # mcp__<server>__<tool>, so match on the suffix). Kept as a suffix test rather
+    # than exact names so an SDK naming change can't silently re-block reading.
+    _BROWSER_READ_SUFFIXES = ("browser_read_page", "browser_list_fields")
+
+    @classmethod
+    def _is_browser_read(cls, tool_name):
+        name = str(tool_name or "")
+        return any(name == s or name.endswith("__" + s) for s in cls._BROWSER_READ_SUFFIXES)
+
     async def _allow_tool(self, tool_name, input_data, context):
         # Run-time guard for interactive tools this GUI can't service. AskUserQuestion
         # blocks the turn waiting for an answer a no-TTY overlay can't supply — it should
@@ -281,6 +291,20 @@ class ClaudeWorker(threading.Thread):
         # below would grant that and silently lift read-only out from under the user;
         # denying keeps the "Read-only" toggle honest until the user flips it off.
         if self._permission_mode == "plan" and PermissionResultDeny is not None:
+            # ...except the browser READ tools. Reading the page the user armed is the
+            # exact analogue of reading their screen, which plan mode already allows —
+            # denying it would make Read-only mean "can't see the browser at all" and
+            # push the model back to guessing from screenshots. browser_fill_form is NOT
+            # in this list: it's an action, and it stays denied under Read-only (its own
+            # approval card is a second, independent gate).
+            if self._is_browser_read(tool_name):
+                return PermissionResultAllow()
+            if str(tool_name or "").endswith("browser_fill_form"):
+                return PermissionResultDeny(
+                    message="The overlay is in Read-only mode, so form filling is off. "
+                            "Tell the user what you'd put in each field as plain text, "
+                            "and that they can turn Read-only off in the ⚙ menu to get "
+                            "the approve-and-fill card.")
             return PermissionResultDeny(
                 message="The user has locked this overlay READ-ONLY (plan mode). Don't "
                         "retry the call or try to exit plan mode — present your findings "

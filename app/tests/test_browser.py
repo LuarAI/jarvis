@@ -200,6 +200,61 @@ class TestTools:
         assert all(a != "fill_fields" for a, _p in b.calls)
 
 
+# ── permission gating: reads survive Read-only, fills don't ──────────────────
+
+class TestReadOnlyGating:
+
+    def _worker(self, mode):
+        import queue as _q
+        from worker import ClaudeWorker
+        return ClaudeWorker(_q.Queue(), permission_mode=mode)
+
+    def test_matcher_covers_namespaced_and_bare_names(self):
+        from worker import ClaudeWorker as W
+        assert W._is_browser_read("mcp__jarvis_browser__browser_read_page")
+        assert W._is_browser_read("browser_read_page")
+        assert W._is_browser_read("mcp__jarvis_browser__browser_list_fields")
+        assert not W._is_browser_read("mcp__jarvis_browser__browser_fill_form")
+        assert not W._is_browser_read("Bash")
+        assert not W._is_browser_read(None)
+
+    def test_read_page_allowed_in_read_only_mode(self):
+        # Reading the armed tab is the analogue of reading the screen, which plan mode
+        # already permits — denying it made Read-only mean "blind to the browser".
+        w = self._worker("plan")
+        res = _run(w._allow_tool("mcp__jarvis_browser__browser_read_page", {}, None))
+        assert type(res).__name__ == "PermissionResultAllow"
+
+    def test_fill_denied_in_read_only_mode_with_a_useful_message(self):
+        w = self._worker("plan")
+        res = _run(w._allow_tool("mcp__jarvis_browser__browser_fill_form", {}, None))
+        assert type(res).__name__ == "PermissionResultDeny"
+        assert "Read-only" in res.message and "⚙" in res.message
+
+    def test_other_tools_still_denied_in_read_only(self):
+        w = self._worker("plan")
+        res = _run(w._allow_tool("Bash", {}, None))
+        assert type(res).__name__ == "PermissionResultDeny"
+
+    def test_fill_allowed_when_not_read_only(self):
+        w = self._worker("bypassPermissions")
+        res = _run(w._allow_tool("mcp__jarvis_browser__browser_fill_form", {}, None))
+        assert type(res).__name__ == "PermissionResultAllow"
+
+
+class TestSystemPromptMentionsBrowser:
+
+    def test_prompt_tells_the_model_the_tools_exist(self):
+        import config
+        p = config.SYSTEM_APPEND
+        # Without this the model never calls the tools — it falls back to screenshots
+        # or asks the user to paste the page (the bug this test locks down).
+        assert "browser_read_page" in p and "browser_fill_form" in p
+        assert "Ctrl+Shift+J" in p
+        assert "untrusted" in p.lower()
+        assert "never claim you" in p.lower()
+
+
 # ── the approval gate (Overlay) ──────────────────────────────────────────────
 
 class TestApprovalGate:
