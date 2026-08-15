@@ -81,9 +81,15 @@ class TestChatListPanel:
         overlay.toggle_chat_list()
         f = overlay._chat_list_frame
         assert f is not None
-        texts = [w.cget("text") for w in f.winfo_children()
-                 if isinstance(w, co.tk.Label)]
-        for lbl, _cmd in overlay._chats_items():
+        # each row is a Frame holding the name Label (+ optional 🗑)
+        texts = []
+        for w in f.winfo_children():
+            if isinstance(w, co.tk.Label):
+                texts.append(w.cget("text"))
+            else:
+                texts.extend(k.cget("text") for k in w.winfo_children()
+                             if isinstance(k, co.tk.Label))
+        for lbl, _cmd, _del in overlay._chats_items():
             assert lbl in texts
         assert overlay.chats_btn.cget("fg") == co.T["accent"]   # lit while open
 
@@ -102,11 +108,73 @@ class TestChatListPanel:
         assert overlay._chat_list_frame is None
         assert overlay._active.wrap.winfo_manager()
 
+    def test_row_click_opens_and_trash_deletes(self, overlay):
+        """The panel renders one row per chat: the label opens, the 🗑 deletes."""
+        overlay.new_chat()
+        overlay.toggle_chat_list()
+        rows = [w for w in overlay._chat_list_frame.winfo_children()
+                if isinstance(w, co.tk.Frame)]
+        assert rows, "expected a Frame per conversation row"
+        kids = rows[0].winfo_children()
+        assert any(isinstance(k, co.tk.Label) and k.cget("text") == "🗑" for k in kids)
+
     def test_switch_chat_closes_open_panel(self, overlay):
         v2 = overlay.new_chat()
         overlay.toggle_chat_list()
         overlay.switch_chat(overlay._views[0])
         assert overlay._chat_list_frame is None
+
+
+# ── the placeholder must never swallow real typing ───────────────────────────
+
+class TestPlaceholder:
+    """Tk has no native placeholder, so the hint is REAL text in the entry. The
+    failure mode the user hit: after switching chats the hint was re-inserted while
+    the entry had focus, so their typing landed beside it, _ph_active stayed True,
+    and _entry_text() returned "" — the message looked typed but could not be sent."""
+
+    def test_typing_clears_the_hint(self, overlay):
+        overlay._ph_in()
+        assert overlay._ph_active is True
+        overlay._ph_key(types.SimpleNamespace(keysym="h", state=0))
+        assert overlay._ph_active is False
+        overlay.entry.insert("insert", "hello")
+        assert overlay._entry_text() == "hello"
+        assert co.PLACEHOLDER not in overlay.entry.get("1.0", "end")
+
+    def test_modifiers_do_not_clear_the_hint(self, overlay):
+        overlay._ph_in()
+        for k in ("Shift_L", "Control_L", "Alt_L"):
+            overlay._ph_key(types.SimpleNamespace(keysym=k, state=0))
+        assert overlay._ph_active is True          # still just a hint
+
+    def test_hint_not_inserted_while_entry_has_focus(self, overlay):
+        overlay.entry.focus_set()
+        overlay.root.update_idletasks()
+        overlay.entry.delete("1.0", "end")
+        overlay._ph_active = False
+        overlay._ph_in()                            # would have armed the trap
+        if overlay.root.focus_get() is overlay.entry:
+            assert overlay._ph_active is False
+            assert co.PLACEHOLDER not in overlay.entry.get("1.0", "end")
+
+    def test_switching_chats_leaves_a_typable_entry(self, overlay):
+        v1 = overlay._views[0]
+        overlay.new_chat()
+        overlay.switch_chat(v1)
+        # whatever the focus state, typing must produce sendable text
+        overlay._ph_key(types.SimpleNamespace(keysym="a", state=0))
+        overlay.entry.insert("insert", "can you see this")
+        assert overlay._entry_text() == "can you see this"
+
+    def test_draft_restore_is_never_greyed(self, overlay):
+        v1 = overlay._views[0]
+        overlay.new_chat()                     # switching away parks v1's draft…
+        v1.draft = "half a thought"            # …so set it AFTER the switch
+        overlay.switch_chat(v1)
+        assert overlay._ph_active is False
+        assert overlay._entry_text() == "half a thought"
+        assert overlay.entry.cget("fg") == co.T["text"]      # not the faint hint colour
 
 
 # ── screenshot thumbnails + lightbox ─────────────────────────────────────────

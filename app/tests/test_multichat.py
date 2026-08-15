@@ -188,18 +188,32 @@ class TestChatsMenu:
         v1.unread = True
         # chat numbers keep climbing across the shared-fixture session, so assert on
         # the views' real names rather than hardcoding "Chat 1"
-        labels = [lbl for lbl, _ in overlay._chats_items() if "Close" not in lbl]
+        labels = [lbl for lbl, _c, _d in overlay._chats_items()]
         assert any(lbl.startswith("● ") and v1.name in lbl for lbl in labels)
         assert any(lbl.startswith("✓ ") and v2.name in lbl for lbl in labels)
 
-    def test_new_and_close_rows_wired(self, overlay):
-        cmds = {lbl: cmd for lbl, cmd in overlay._chats_items()}
-        assert any("New chat" in lbl for lbl in cmds)
-        assert not any("Close this chat" in lbl for lbl in cmds)   # single chat → no close
+    def test_one_delete_action_per_chat_not_three(self, overlay):
+        """Regression: the list used to carry a per-chat "Close", a global "Close
+        this chat" AND a "Delete" row — three labels for one idea."""
         overlay.new_chat()
-        cmds = {lbl: cmd for lbl, cmd in overlay._chats_items()}
-        close = next(cmd for lbl, cmd in cmds.items() if "Close this chat" in lbl)
-        assert close == overlay.close_chat
+        rows = overlay._chats_items()
+        labels = [lbl for lbl, _c, _d in rows]
+        assert not any("Close this chat" in l for l in labels)
+        assert not any(l.startswith("     ") for l in labels)      # no indented rows
+        chat_rows = [r for r in rows if "New chat" not in r[0]]
+        for _lbl, open_cmd, delete_cmd in chat_rows:
+            assert callable(open_cmd) and callable(delete_cmd)     # one of each, inline
+
+    def test_single_chat_has_no_delete(self, overlay):
+        rows = [r for r in overlay._chats_items() if "New chat" not in r[0]]
+        assert len(rows) == 1
+        assert rows[0][2] is None            # the only chat can't be deleted
+
+    def test_new_chat_row_wired(self, overlay):
+        rows = overlay._chats_items()
+        new = next(r for r in rows if "New chat" in r[0])
+        assert new[1] == overlay.new_chat
+        assert new[2] is None                # nothing to delete on the "new" row
 
     def test_first_prompt_snippet_in_row(self, overlay, monkeypatch):
         monkeypatch.setattr(co.authstate, "dead_reason", lambda: None)
@@ -207,8 +221,8 @@ class TestChatsMenu:
         overlay._ph_out()
         overlay.entry.insert("1.0", "review my resume please")
         overlay._send_or_stop()
-        labels = [lbl for lbl, _ in overlay._chats_items()]
-        assert any("review my resume please" in lbl for lbl in labels)
+        labels = [lbl for lbl, _c, _d in overlay._chats_items()]
+        assert any("review my resume" in lbl for lbl in labels)
 
 
 # ---------------------------------------------------------------------------

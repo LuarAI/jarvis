@@ -406,11 +406,11 @@ class Overlay:
         v.wrap.pack(fill="both", expand=True)
         self.entry.delete("1.0", "end")
         self._ph_active = False
+        self.entry.configure(fg=T["text"])
         if v.draft:
-            self.entry.configure(fg=T["text"])
             self.entry.insert("1.0", v.draft)
         else:
-            self._ph_in()
+            self._ph_in()      # no-ops while the entry has focus (see _ph_in)
         # chrome that reflects the ACTIVE chat
         self._refresh_send()
         self.busy_lbl.configure(text="thinking…" if v.busy else "")
@@ -1194,6 +1194,7 @@ class Overlay:
         self.entry.bind("<Shift-Insert>", self._on_paste)
         self.entry.bind("<FocusIn>", self._ph_out)
         self.entry.bind("<FocusOut>", self._ph_in)
+        self.entry.bind("<Key>", self._ph_key, add="+")   # typing clears the hint too
         self.entry.bind("<FocusIn>", self._precapture_soon, add="+")
         self.entry.bind("<KeyRelease>", self._precapture_soon, add="+")
         self._ph_active = False
@@ -1669,31 +1670,31 @@ class Overlay:
         finally:
             m.grab_release()
 
-    # ── 💬 multi-chat menu ──
+    # ── ☰ conversation list ──
     def _chats_items(self):
-        """The (label, command) rows of the 💬 chat switcher. Split out from _chats_menu
-        (like _gear_items) so it's unit-testable without popping a real Tk menu.
-        ✓ marks the active chat; ● marks a background chat with a finished reply."""
+        """The (label, open, delete) rows of the ☰ list. Split out from the panel so
+        it's unit-testable without building widgets. ✓ marks the active chat; ●
+        marks a background chat with a finished reply.
+
+        One row per conversation — open chats first, then reopenable ones — each
+        carrying its own 🗑 delete (None when it can't be deleted). Earlier versions
+        stacked a "Close this chat", an indented per-chat "Close", AND a separate
+        "Delete" row: three labels for one idea."""
         items = []
         for v in self._views:
             mark = "✓ " if v is self._active else ("● " if v.unread else "    ")
             busy = "  ⋯" if (v.busy and v is not self._active) else ""
             snip = (v.first_prompt or "").strip().replace("\n", " ")
-            label = f"{mark}{v.name}" + (f" — {snip[:32]}" if snip else "") + busy
-            items.append((label, (lambda vv=v: self.switch_chat(vv))))
-            if len(self._views) > 1:      # close ANY chat from the list, not just the open one
-                items.append((f"        🗑  Close {v.name}",
-                              (lambda vv=v: self.close_chat(vv))))
-        items.append(("＋  New chat   (Ctrl+N)", self.new_chat))
-        if len(self._views) > 1:
-            items.append(("✕  Close this chat", self.close_chat))
+            label = f"{mark}{v.name}" + (f" — {snip[:30]}" if snip else "") + busy
+            items.append((label, (lambda vv=v: self.switch_chat(vv)),
+                          (lambda vv=v: self.close_chat(vv)) if len(self._views) > 1 else None))
         for rec in self._recent_choices():
             age = self._age_str(time.time() - rec["ts"]) if isinstance(rec.get("ts"), (int, float)) else "?"
-            name = (rec.get("name") or "conversation").strip()[:32]
-            items.append((f"↺  Reopen: {name}  ({age} ago)",
-                          (lambda r=rec: self.reopen_session(r))))
-            items.append((f"🗑  Delete: {name}",
+            name = (rec.get("name") or "conversation").strip()[:30]
+            items.append((f"↺  {name}  ({age} ago)",
+                          (lambda r=rec: self.reopen_session(r)),
                           (lambda r=rec: self.delete_recent(r))))
+        items.append(("＋  New chat   (Ctrl+N)", self.new_chat, None))
         return items
 
     def delete_recent(self, rec):
@@ -1715,14 +1716,32 @@ class Overlay:
         f = tk.Frame(self.chat_area, bg=T["bg"])
         tk.Label(f, text="Conversations", bg=T["bg"], fg=T["muted"], font=self.f_chip,
                  anchor="w").pack(fill="x", padx=self.px(16), pady=(self.px(10), self.px(2)))
-        for lbl, cmd in self._chats_items():
-            row = tk.Label(f, text=lbl, anchor="w", justify="left", bg=T["bg"],
-                           fg=T["text"], font=self.f_body, padx=self.px(16),
-                           pady=self.px(7), cursor="hand2")
+        for lbl, cmd, delete in self._chats_items():
+            # One row per conversation: the label opens it, the 🗑 on the right
+            # deletes it. Both live on the same line — a separate indented row
+            # under the name read as a different, confusing item.
+            row = tk.Frame(f, bg=T["bg"])
             row.pack(fill="x")
-            row.bind("<Enter>", lambda e, r=row: r.configure(bg=T["hover"]))
-            row.bind("<Leave>", lambda e, r=row: r.configure(bg=T["bg"]))
-            row.bind("<Button-1>", lambda e, c=cmd: self._chat_list_action(c))
+            name = tk.Label(row, text=lbl, anchor="w", justify="left", bg=T["bg"],
+                            fg=T["text"], font=self.f_body, padx=self.px(16),
+                            pady=self.px(7), cursor="hand2")
+            name.pack(side="left", fill="x", expand=True)
+            kids = [row, name]
+            if delete is not None:
+                trash = tk.Label(row, text="🗑", bg=T["bg"], fg=T["faint"],
+                                 font=self.f_small, padx=self.px(12), cursor="hand2")
+                trash.pack(side="right")
+                trash.bind("<Button-1>", lambda e, d=delete: self._chat_list_action(d))
+                trash.bind("<Enter>", lambda e, t=trash: t.configure(fg=T["err"]))
+                trash.bind("<Leave>", lambda e, t=trash: t.configure(fg=T["faint"]))
+                kids.append(trash)
+            for w in kids:
+                w.bind("<Enter>", lambda e, ws=kids: [x.configure(bg=T["hover"]) for x in ws],
+                       add="+")
+                w.bind("<Leave>", lambda e, ws=kids: [x.configure(bg=T["bg"]) for x in ws],
+                       add="+")
+            for w in (row, name):
+                w.bind("<Button-1>", lambda e, c=cmd: self._chat_list_action(c))
         self._active.wrap.pack_forget()
         f.pack(fill="both", expand=True)
         self._chat_list_frame = f
@@ -2168,7 +2187,18 @@ class Overlay:
         self._paint_send()
 
     # ── placeholder ──
+    # The hint is REAL TEXT in the entry (Tk has no native placeholder), so the one
+    # thing that must never happen is the user typing while it's still there: their
+    # words then sit next to the hint, _ph_active stays True, and _entry_text()
+    # reports "" — the message looks typed but can't be sent (and Enter does
+    # nothing). Hence: never show it while the entry has focus, and clear it on the
+    # first keystroke as well as on focus.
     def _ph_in(self, e=None):
+        try:
+            if self.root.focus_get() is self.entry:
+                return          # focused: the user may type at any moment
+        except Exception:
+            pass
         if not self.entry.get("1.0", "end").strip():
             self.entry.delete("1.0", "end")
             self.entry.insert("1.0", PLACEHOLDER)
@@ -2180,6 +2210,19 @@ class Overlay:
             self.entry.delete("1.0", "end")
             self.entry.configure(fg=T["text"])
             self._ph_active = False
+
+    def _ph_key(self, e=None):
+        """First keystroke clears the hint. Bound with add='+' BEFORE Tk inserts the
+        character, so the typed text never lands beside the placeholder. Modifier-only
+        presses (Shift, Ctrl…) don't count as typing."""
+        if not self._ph_active:
+            return
+        if e is not None and (e.keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R",
+                                           "Alt_L", "Alt_R", "Caps_Lock", "Tab",
+                                           "Escape", "Win_L", "Win_R")
+                              or (e.state & 0x4 and e.keysym.lower() in ("c", "a", "v", "x"))):
+            return              # Ctrl+C/A/V/X and bare modifiers leave the hint alone
+        self._ph_out()
 
     def _entry_text(self):
         return "" if self._ph_active else self.entry.get("1.0", "end").strip()

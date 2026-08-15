@@ -509,17 +509,21 @@ class TestDeleteChats:
         assert ids == ["keep-me"]
         assert "Removed" in overlay.chat.get("1.0", "end")
 
-    def test_list_offers_delete_for_each_saved_conversation(self, overlay):
+    def test_saved_conversation_row_carries_its_own_delete(self, overlay):
         co._save_state(recent_sessions=[
             {"id": "s1", "ts": time.time(), "cwd": co.WORKING_DIR, "name": "cover letter"}])
-        labels = [l for l, _ in overlay._chats_items()]
-        assert any(l.startswith("🗑") and "cover letter" in l for l in labels)
+        row = next(r for r in overlay._chats_items() if "cover letter" in r[0])
+        assert row[0].startswith("↺")        # reopen on click…
+        assert callable(row[2])              # …delete on the row's own 🗑
 
-    def test_list_offers_close_for_each_open_chat(self, overlay):
+    def test_every_open_chat_row_has_a_delete_when_several(self, overlay):
+        co._save_state(recent_sessions=[])     # only OPEN chats in this assertion
         overlay.new_chat()
-        labels = [l for l, _ in overlay._chats_items()]
-        closes = [l for l in labels if l.strip().startswith("🗑  Close")]
-        assert len(closes) == 2                      # one per open chat
+        open_names = {v.name for v in overlay._views}
+        chat_rows = [r for r in overlay._chats_items()
+                     if any(n in r[0] for n in open_names)]
+        assert len(chat_rows) == len(overlay._views) >= 2
+        assert all(callable(r[2]) for r in chat_rows)   # one delete each, inline
 
     def test_close_a_background_chat_directly(self, overlay):
         v1 = overlay._views[0]
