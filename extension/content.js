@@ -105,18 +105,47 @@
     return "";
   }
 
-  // shadow DOM: querySelectorAll can't cross roots (Bitwarden's traversal)
-  function deepQueryAll(root, out) {
+  const FIELD_SEL = "input,textarea,select,[contenteditable=''],[contenteditable='true']";
+
+  /* Shadow-root accessor.
+   *
+   * chrome.dom.openOrClosedShadowRoot(el) THROWS for anything that isn't a valid
+   * shadow host — which is almost every node on a page. The old code only checked
+   * that the API existed, never that the call succeeded, so on a big site
+   * (LinkedIn) the very first non-host element killed the entire scan and every
+   * frame reported an error. Always attempt the cheap open .shadowRoot first, and
+   * treat the closed-root API as best-effort. */
+  function shadowRootOf(el) {
+    try {
+      if (el.shadowRoot) return el.shadowRoot;
+    } catch (e) { /* some elements throw on access */ }
+    try {
+      if (chrome.dom && typeof chrome.dom.openOrClosedShadowRoot === "function") {
+        return chrome.dom.openOrClosedShadowRoot(el) || null;
+      }
+    } catch (e) { /* not a shadow host — by far the common case */ }
+    return null;
+  }
+
+  // shadow DOM: querySelectorAll can't cross roots (Bitwarden's traversal).
+  // Depth- and size-capped: a malformed/recursive tree must not hang the page.
+  function deepQueryAll(root, out, depth) {
     out = out || [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-    let n = walker.currentNode;
-    while (n) {
-      if (n.matches && n.matches("input,textarea,select,[contenteditable=''],[contenteditable='true']")) out.push(n);
-      const sr = n.shadowRoot ||
-        (chrome.dom && chrome.dom.openOrClosedShadowRoot ? chrome.dom.openOrClosedShadowRoot(n) : null);
-      if (sr) deepQueryAll(sr, out);
-      n = walker.nextNode();
+    depth = depth || 0;
+    if (depth > 8 || out.length > 2000) return out;
+    let nodes;
+    try {
+      nodes = root.querySelectorAll ? root.querySelectorAll("*") : [];
+    } catch (e) {
+      return out;
     }
+    for (const n of nodes) {
+      try {
+        if (n.matches && n.matches(FIELD_SEL)) out.push(n);
+      } catch (e) { /* exotic element — skip */ }
+      const sr = shadowRootOf(n);
+      if (sr) deepQueryAll(sr, out, depth + 1);   // the old walker never descended:
+    }                                             // createTreeWalker ignored `root`
     return out;
   }
 
@@ -136,6 +165,10 @@
     const fields = [];
     const excluded = { credentials: 0, hidden_or_honeypot: 0 };
     for (const el of deepQueryAll(document)) {
+      // One awkward element must never cost the whole page: skip it and carry on.
+      // (A single throw here used to fail the entire frame, which is how a
+      // shadow-DOM quirk turned into "the reader failed on every frame".)
+      try {
       if (isForbidden(el)) { excluded.credentials++; continue; }
       if (!isVisible(el)) { excluded.hidden_or_honeypot++; continue; }
       const ref = "f" + ++refSeq;
@@ -160,6 +193,7 @@
         if (el.options.length > 60) f.optionsTruncated = true;
       }
       fields.push(f);
+      } catch (e) { /* unreadable element — omit it rather than fail the scan */ }
     }
     return { fields, excluded_counts: excluded };
   }
@@ -318,16 +352,25 @@
   const onMessage = (msg, _sender, respond) => {
     try {
       if (msg.action === "read_page") {
-        const scan = scanFields();
+        // Text and fields fail independently: a page whose form scan trips must
+        // still return its text (and vice versa), instead of the whole frame
+        // reporting failure and the user being told to reload.
+        let text = "", fields = [], excluded = { credentials: 0, hidden_or_honeypot: 0 };
+        const warnings = [];
+        try { text = pageText(msg.params && msg.params.limit); }
+        catch (e) { warnings.push("text: " + (e && e.message || e)); }
+        try { const s = scanFields(); fields = s.fields; excluded = s.excluded_counts; }
+        catch (e) { warnings.push("fields: " + (e && e.message || e)); }
         respond({
           ok: true,
           url: location.href,
           title: document.title,
           ats: atsOf(),
           isTop: window.top === window,
-          page_text: pageText(msg.params && msg.params.limit),
-          fields: scan.fields,
-          excluded_counts: scan.excluded_counts,
+          page_text: text,
+          fields: fields,
+          excluded_counts: excluded,
+          warnings: warnings.length ? warnings : undefined,
         });
       } else if (msg.action === "list_fields") {
         const scan = scanFields();
