@@ -192,6 +192,43 @@ class TestPublicationOwnership:
         finally:
             other.kill()
 
+    def test_connect_notice_is_announced_once(self, bridge):
+        """Chrome runs a host process per native port and the proxy reconnects on
+        its own; without deduping, the chat filled with identical connect notices."""
+        events = []
+        bridge._on_event = lambda kind, payload: events.append(kind)
+        proxies = []
+        for _ in range(3):                       # three successive connections
+            p = FakeProxy(bridge, lambda a, pr: {"ok": True})
+            p.connect()
+            for _ in range(50):
+                if bridge.connected:
+                    break
+                time.sleep(0.02)
+            proxies.append(p)
+            time.sleep(0.1)
+        assert events.count("browser_connected") == 1, events
+        for p in proxies:
+            p.close()
+
+    def test_superseded_connection_closing_does_not_fail_live_requests(self, bridge):
+        a = FakeProxy(bridge, lambda act, pr: {"ok": True, "from": "a"})
+        a.connect()
+        for _ in range(50):
+            if bridge.connected:
+                break
+            time.sleep(0.02)
+        b = FakeProxy(bridge, lambda act, pr: {"ok": True, "from": "b"})
+        b.connect()                              # supersedes a; a's thread then ends
+        for _ in range(50):
+            time.sleep(0.02)
+            if bridge.connected:
+                break
+        time.sleep(0.3)                          # let a's teardown run
+        res = bridge.request("read_page", timeout=5)
+        assert res.get("ok") and res.get("from") == "b"
+        a.close(); b.close()
+
     def test_pid_alive_detects_dead_processes(self):
         assert browser_bridge.BrowserBridge._pid_alive(os.getpid()) is True
         assert browser_bridge.BrowserBridge._pid_alive(999999) is False

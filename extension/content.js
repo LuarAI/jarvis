@@ -10,8 +10,21 @@
  *     dispatched into a form (implicit submission).
  */
 (() => {
-  if (window.__jarvisContentLoaded) return;
-  window.__jarvisContentLoaded = true;
+  /* Re-injection: REPLACE, never skip.
+   *
+   * The old guard returned early when a flag was set. But the service worker
+   * re-injects this file to recover a frame that isn't answering — and an early
+   * return left that frame with the flag set and NO live listener, so it never
+   * replied and every read failed permanently. LinkedIn hit this every time: its
+   * SPA rewrites the DOM without reloading, so the declared script's listener can
+   * be gone while the flag survives.
+   *
+   * Now each injection tears down the previous listener (if any) and installs a
+   * fresh one, so re-injecting always heals the frame.
+   */
+  if (window.__jarvisTeardown) {
+    try { window.__jarvisTeardown(); } catch (e) { /* previous listener already dead */ }
+  }
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   let refSeq = 0;
@@ -302,7 +315,7 @@
   }
 
   // ── message handling ────────────────────────────────────────────────────
-  chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
+  const onMessage = (msg, _sender, respond) => {
     try {
       if (msg.action === "read_page") {
         const scan = scanFields();
@@ -344,5 +357,13 @@
       respond({ ok: false, error: String(e && e.message || e) });
     }
     return true;
-  });
+  };
+
+  chrome.runtime.onMessage.addListener(onMessage);
+  // Let the NEXT injection remove this listener, so re-injecting a wedged frame
+  // always yields exactly one live listener (see the header comment).
+  window.__jarvisTeardown = () => {
+    try { chrome.runtime.onMessage.removeListener(onMessage); } catch (e) { /* gone */ }
+    window.__jarvisTeardown = null;
+  };
 })();

@@ -78,9 +78,14 @@ function send(obj) {
  */
 async function askFrames(tabId, msg) {
   let frameIds = [0];
+  const frameUrl = {};
+  const diag = [];                        // why each frame failed — surfaced on error
   try {
     const frames = await chrome.webNavigation.getAllFrames({ tabId });
-    if (frames && frames.length) frameIds = frames.map((f) => f.frameId);
+    if (frames && frames.length) {
+      frameIds = frames.map((f) => f.frameId);
+      for (const f of frames) frameUrl[f.frameId] = f.url;
+    }
   } catch (e) { /* no webNavigation permission / restricted page → top frame only */ }
 
   /* Ask a frame, injecting the content script first if it isn't there.
@@ -90,16 +95,24 @@ async function askFrames(tabId, msg) {
    * which meant the retry never ran and a page whose declared script hadn't loaded
    * looked permanently unreachable ("the connection to that tab is stale"). */
   async function askFrame(frameId) {
+    const short = (u) => String(u || "").slice(0, 60);
     try {
       const r = await chrome.tabs.sendMessage(tabId, msg, { frameId });
       if (r && r.ok) return { frameId, r };
+      if (r) { diag.push({ frameId, url: short(frameUrl[frameId]),
+                           error: "replied not-ok: " + (r.error || "?") }); return null; }
     } catch (e) { /* no content script here yet — inject and retry below */ }
     try {
       await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] },
                                              files: ["content.js"] });
       const r = await chrome.tabs.sendMessage(tabId, msg, { frameId });
       if (r && r.ok) return { frameId, r };
-    } catch (e) { /* restricted frame (ad, about:blank, cross-origin) — skip it */ }
+      diag.push({ frameId, url: short(frameUrl[frameId]),
+                  error: r ? ("replied not-ok: " + (r.error || "?")) : "no reply after inject" });
+    } catch (e) {
+      diag.push({ frameId, url: short(frameUrl[frameId]),
+                  error: String((e && e.message) || e).slice(0, 120) });
+    }
     return null;
   }
 
@@ -110,8 +123,11 @@ async function askFrames(tabId, msg) {
     if (top) live = [top];
   }
   if (!live.length) {
-    return { error: "Couldn't reach the page — try reloading the tab. (Chrome can't "
-                  + "read chrome:// pages, the Web Store, or PDF viewers at all.)" };
+    // Report WHY, per frame — a bare "couldn't reach the page" told nobody anything
+    // and cost several rounds of guesswork.
+    const why = diag.map((d) => `frame ${d.frameId} (${d.url || "?"}): ${d.error}`).join(" | ");
+    return { error: "Couldn't reach the page. " + (why || "no frames responded.")
+                  + " (Chrome cannot read chrome:// pages, the Web Store, or PDFs.)" };
   }
 
   if (msg.action === "fill_fields") {

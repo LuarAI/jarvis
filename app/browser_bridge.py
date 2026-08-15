@@ -98,6 +98,7 @@ class BrowserBridge:
         self._seq = 0
         self._running = False
         self._on_event = on_event    # called (kind, payload) for unsolicited messages
+        self._announced = False      # "browser connected" said once per real outage
         self.last_error = None
 
     # ── lifecycle ──
@@ -238,7 +239,11 @@ class BrowserBridge:
                 old.close()          # newest browser session wins
             except Exception:
                 pass
-        if self._on_event:
+        # Announce only a genuine transition to "connected". Chrome runs one host
+        # process per native port and our proxy reconnects on its own, so without
+        # this the chat filled with identical connect notices (the user's spam).
+        if self._on_event and not self._announced:
+            self._announced = True
             self._on_event("browser_connected", None)
         try:
             while self._running:
@@ -250,15 +255,21 @@ class BrowserBridge:
             pass
         finally:
             with self._conn_lock:
-                if self._conn is conn:
+                was_active = self._conn is conn
+                if was_active:
                     self._conn = None
             try:
                 conn.close()
             except Exception:
                 pass
-            self._fail_pending("The browser extension disconnected.")
-            if self._on_event:
-                self._on_event("browser_disconnected", None)
+            # Only the ACTIVE connection dropping is an outage; a superseded one
+            # closing is routine (Chrome spawns a host per port) and must not
+            # fail live requests or re-arm the connect notice.
+            if was_active:
+                self._fail_pending("The browser extension disconnected.")
+                self._announced = False
+                if self._on_event:
+                    self._on_event("browser_disconnected", None)
 
     def _dispatch(self, msg):
         rid = msg.get("id")
