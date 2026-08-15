@@ -1,6 +1,6 @@
 @echo off
-setlocal enabledelayedexpansion
-rem ── Jarvis browser bridge: register the native messaging host for Chrome/Edge ──
+setlocal
+rem -- Jarvis browser bridge: register the native messaging host for Chrome/Edge --
 rem Run this ONCE after loading the extension unpacked (you need its ID).
 rem Usage:  install.cmd <extension-id>
 rem The ID is shown on chrome://extensions with Developer mode on.
@@ -15,6 +15,7 @@ if "%~1"=="" (
   echo.
   exit /b 1
 )
+rem Run from cmd.exe. In PowerShell use:  cmd /c install.cmd ^<extension-id^>
 
 set "HOSTDIR=%~dp0"
 set "MANIFEST=%HOSTDIR%com.jarvis.host.json"
