@@ -42,12 +42,13 @@ class FakeWorker:
     """Stand-in for ClaudeWorker: stores the UI queue, records calls for assertions,
     starts no thread and connects to nothing."""
 
-    def __init__(self, ui_queue, permission_mode=None, model=None):
+    def __init__(self, ui_queue, permission_mode=None, model=None, browser_server=None):
         self.ui = ui_queue
         self.req = queue.Queue()
         self.calls = []
         self.permission_mode = permission_mode   # launch mode the Overlay asked for
         self.model = model                       # launch model the Overlay asked for
+        self.browser_server = browser_server     # in-process browser MCP server, if any
 
     def _rec(self, name, *a):
         self.calls.append((name, a))
@@ -82,9 +83,14 @@ def _overlay_singleton():
         ov = co.Overlay()
     except Exception as e:
         # Headless / odd CI: skip the whole UI suite cleanly instead of erroring it.
-        # (Catch broadly: tk.Tk() raises TclError without a display, but _build also
-        # makes Win32/ctypes calls that could raise something else on a bare runner.)
+        # (tk.Tk() raises TclError without a display, and _build makes Win32/ctypes
+        # calls that can raise other things on a bare runner.) But a TypeError is
+        # never a display problem — it's our own signature drift (e.g. FakeWorker
+        # missing a kwarg the Overlay now passes), and skipping it silently hid real
+        # breakage twice. Those must fail loudly.
         mp.undo()
+        if isinstance(e, (TypeError, AttributeError, NameError)):
+            raise
         pytest.skip(f"Overlay/Tk unavailable (no display?): {type(e).__name__}: {e}")
     ov.root.withdraw()
     ov.root.update_idletasks()
@@ -164,6 +170,7 @@ def _clean_overlay(ov):
     ov._thinking_active = False
     ov._voice_rec = None                # a test that started 'recording' must not leak it
     ov._voice_busy = False
+    ov._pending_fill = None             # an un-approved fill proposal must not leak either
     try:
         ov.mic_btn.configure(text="🎤")
     except Exception:

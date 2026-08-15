@@ -70,8 +70,13 @@ from modelresolve import resolve_model
 import authstate
 
 class ClaudeWorker(threading.Thread):
-    def __init__(self, ui_queue: "queue.Queue", permission_mode=None, model=None):
+    def __init__(self, ui_queue: "queue.Queue", permission_mode=None, model=None,
+                 browser_server=None):
         super().__init__(daemon=True)
+        # In-process MCP server exposing the Chrome-extension tools (browser_read_page /
+        # browser_list_fields / browser_fill_form). Built by the UI (it owns the bridge and
+        # the approval panel) and handed in; None → no browser tools this session.
+        self._browser_server = browser_server
         # Tap the UI channel so the debug log captures every worker→UI event (no-op when
         # DEBUG_LOG is ""). The UI side keeps reading the raw queue.
         self.ui = _UIQueueTap(ui_queue) if DEBUG_LOG else ui_queue
@@ -325,6 +330,11 @@ class ClaudeWorker(threading.Thread):
             # grants file ACCESS only; nothing is loaded until the model reads a file,
             # so a huge folder costs zero tokens until actually used.
             opts["add_dirs"] = list(CONTEXT_DIRS)
+        if self._browser_server is not None:
+            # Jarvis browser tools ride in the same mcp_servers dict as any declared
+            # server. In-process (SdkMcpServer), so there's no subprocess and no port —
+            # the tool functions run right here and call the bridge.
+            opts.setdefault("mcp_servers", {})["jarvis_browser"] = self._browser_server
         if MCP_SERVERS:
             # The servers the overlay declares for ITSELF (config.MCP_SERVERS, empty by
             # default). Under strict_mcp_config below this is the ONLY way an MCP server

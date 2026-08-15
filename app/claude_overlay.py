@@ -114,6 +114,8 @@ try:
     from worker import ClaudeWorker
     import authstate
     import voice
+    import browser_bridge
+    import browser_tools
 except Exception as _e:
     _report_import_failure(_e)
 
@@ -272,6 +274,13 @@ class Overlay:
         # precapture, update checks): background threads must not put these through the
         # delegated `self.ui_q` (which view that resolves to mid-_poll is a race).
         self._app_q: "queue.Queue" = queue.Queue()
+        # Browser bridge (phase 3): the endpoint the Chrome extension's native-messaging
+        # proxy connects to. Started before any worker so the tools exist from turn one;
+        # a failure here just means no browser tools, never a broken overlay.
+        self.bridge = browser_bridge.BrowserBridge(
+            on_event=lambda kind, payload: self._app_q.put((kind, payload)))
+        self.bridge.start()
+        self._pending_fill = None       # the proposal awaiting the user's approval
         v = self._new_chat_state()      # chat 1: state + worker now, widgets in _build_chat
         self._views.append(v)
         self._active = self._cur = v
@@ -359,7 +368,9 @@ class Overlay:
         self._chat_seq += 1
         ro, launch_mode = _startup_permission_mode()
         q: "queue.Queue" = queue.Queue()
-        w = ClaudeWorker(q, permission_mode=launch_mode, model=_startup_model())
+        server = browser_tools.build_server(self.bridge, self._propose_fill)
+        w = ClaudeWorker(q, permission_mode=launch_mode, model=_startup_model(),
+                         browser_server=server)
         v = ChatView(self._chat_seq, w, q)
         v.read_only = ro
         w.start()
@@ -1778,6 +1789,143 @@ class Overlay:
         self._update_user_config("VOICE_DEVICE", value)
         self.add_sys(f"🎙 Microphone: {label}. Applies to the next recording — click "
                      "the mic and watch the level bar move to confirm it's live.")
+
+    # ── browser form filling: propose → USER APPROVES → fill ──
+    def _propose_fill(self, fills):
+        """Called from the WORKER thread by the browser_fill_form tool. Never fills:
+        it queues the proposal for the Tk thread to render as an approval card and
+        returns immediately, so the model's turn continues while the user decides.
+        The fill itself only happens if the user clicks Fill."""
+        clean = []
+        for f in fills or []:
+            ref = str(f.get("ref", "")).strip()
+            if not ref:
+                continue
+            clean.append({"ref": ref, "value": str(f.get("value", "")),
+                          "why": str(f.get("why", ""))[:120]})
+        if not clean:
+            return "No usable fills in that proposal."
+        self._app_q.put(("fill_proposal", clean))
+        return (f"Proposed {len(clean)} field(s). The user now sees each one in Jarvis "
+                "and must approve before anything is typed — tell them to review it. "
+                "Do not call browser_fill_form again for the same fields.")
+
+    def _render_fill_proposal(self, fills):
+        """The approval card: every proposed field, its value, and Fill / Cancel.
+        Nothing reaches the page until Fill is clicked here."""
+        self._pending_fill = list(fills)
+        self.add_sys(f"📝 Claude proposes filling {len(fills)} field(s) in the armed "
+                     "browser tab. Nothing is typed until you approve:")
+        # Resolve labels for the refs from the live page so the user reviews human
+        # names, not opaque ids. Best-effort: a failed lookup still shows the ref.
+        labels = {}
+        res = self.bridge.request("list_fields", timeout=6.0)
+        for f in (res.get("fields") or []) if isinstance(res, dict) else []:
+            labels[f.get("ref")] = f.get("label") or f.get("ref")
+        for f in fills:
+            name = labels.get(f["ref"], f["ref"])
+            val = f["value"] if len(f["value"]) <= 120 else f["value"][:117] + "…"
+            why = f"    ({f['why']})" if f.get("why") else ""
+            self._ins(f"\n  • {name}: {val}{why}\n", "sys")
+        at_bottom = self.follow
+        self.chat.insert("end", "\n")
+        self.chat.window_create("end", window=self._fill_btns(), padx=self.px(16),
+                                pady=self.px(2))
+        self.chat.insert("end", "\n")
+        if at_bottom:
+            self.chat.see("end")
+        self._prune_chat()
+
+    def _fill_btns(self):
+        """Fill / Cancel pair for a pending proposal (embedded-canvas pattern)."""
+        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2",
+                      takefocus=0)
+        st = {"f": None, "w": 0, "h": 0, "rad": 0, "split": 0}
+        c._ustate = "idle"                   # idle | done | cancelled | working
+
+        def draw(hover=None):
+            c.delete("all")
+            if c._ustate == "idle":
+                round_rect(c, 1, 1, st["split"] - 2, st["h"] - 1, st["rad"],
+                           fill=(T["accent_hi"] if hover == "fill" else T["accent"]), outline="")
+                c.create_text(st["split"] / 2, st["h"] / 2, text="✓  Fill these fields",
+                              fill=T["on_accent"], font=st["f"], anchor="center")
+                round_rect(c, st["split"] + 2, 1, st["w"] - 1, st["h"] - 1, st["rad"],
+                           fill=T["tool_bg"], outline="")
+                c.create_text((st["split"] + st["w"]) / 2, st["h"] / 2, text="Cancel",
+                              fill=T["muted"], font=st["f"], anchor="center")
+            else:
+                msg = {"done": "✓  Filled — check the page",
+                       "cancelled": "✕  Cancelled — nothing was typed",
+                       "working": "Filling…"}[c._ustate]
+                round_rect(c, 1, 1, st["w"] - 1, st["h"] - 1, st["rad"],
+                           fill=T["tool_bg"], outline="")
+                c.create_text(st["w"] / 2, st["h"] / 2, text=msg, fill=T["muted"],
+                              font=st["f"], anchor="center")
+
+        def render():
+            f = tkfont.Font(root=self.root, font=self.f_small)
+            c._overlay_fonts = [f]
+            pad = self.px(14)
+            w1 = pad + f.measure("✓  Fill these fields") + pad
+            w2 = pad + f.measure("✕  Cancelled — nothing was typed") + pad
+            st.update(f=f, h=self.px(26), rad=self.px(7), split=w1, w=max(w1 + w2, w2))
+            c.configure(width=st["w"], height=st["h"])
+            draw()
+
+        def on_click(e):
+            if c._ustate != "idle":
+                return "break"
+            if e.x <= st["split"]:
+                c._ustate = "working"
+                draw()
+                self._execute_fill(c)
+            else:
+                self._pending_fill = None
+                c._ustate = "cancelled"
+                draw()
+            return "break"
+        c._click = on_click                  # testable handle (withdrawn windows eat clicks)
+        c._draw = draw
+
+        render()
+        c.bind("<Button-1>", on_click)
+        c.bind("<Motion>", lambda e: draw("fill" if e.x <= st["split"] else "cancel"))
+        c.bind("<Leave>", lambda e: draw())
+        c.bind("<MouseWheel>", self._fwd_wheel)
+        self._register_zoomable(c, render)
+        return c
+
+    def _execute_fill(self, btn):
+        """User approved: send the fills to the page on a background thread (the
+        bridge round-trip must not freeze Tk), then report what actually landed."""
+        fills = self._pending_fill or []
+        self._pending_fill = None
+        if not fills:
+            return
+
+        def bg():
+            res = self.bridge.request("fill_fields", {"fills": fills}, timeout=45.0)
+            self._app_q.put(("fill_result", (btn, res)))
+        threading.Thread(target=bg, daemon=True).start()
+
+    def _on_fill_result(self, btn, res):
+        try:
+            btn._ustate = "done"
+            btn._draw()
+        except Exception:
+            pass
+        if not isinstance(res, dict) or res.get("error") or not res.get("ok"):
+            self.add_err(f"Fill failed: {(res or {}).get('error', 'unknown error')}")
+            return
+        results = res.get("results") or []
+        ok = [r for r in results if r.get("ok")]
+        bad = [r for r in results if not r.get("ok")]
+        self.add_sys(f"✓ Filled {len(ok)} field(s)" +
+                     (f"; {len(bad)} couldn't be filled" if bad else "") +
+                     ". Nothing was submitted — review the page and submit yourself.")
+        for r in bad[:5]:
+            self._ins(f"  • {r.get('ref')}: {r.get('error')}\n", "err")
 
     # ── voice input (dictation) ──
     def _paint_mic(self, hover=False):
@@ -4521,6 +4669,15 @@ class Overlay:
                          "CLI started a fresh session, so earlier context isn't available.")
         elif kind == "replay":
             self._render_replay(payload)
+        elif kind == "fill_proposal":
+            self._render_fill_proposal(payload)
+        elif kind == "fill_result":
+            self._on_fill_result(payload[0], payload[1])
+        elif kind == "browser_connected":
+            self.add_sys("🌐 Chrome extension connected. Arm a tab with Ctrl+Shift+J "
+                         "(or the Jarvis toolbar button), then ask me to read the page.")
+        elif kind == "browser_disconnected":
+            self._pending_fill = None      # a proposal can't outlive its browser session
         elif kind == "voice_text":
             self._on_voice_text(payload)
         elif kind == "voice_err":
@@ -4616,6 +4773,10 @@ class Overlay:
         try:
             if getattr(self, "_keyboard", None):
                 self._keyboard.unhook_all()
+        except Exception:
+            pass
+        try:
+            self.bridge.stop()       # drop the ipc.json token file + close the socket
         except Exception:
             pass
         self._shutdown_workers()

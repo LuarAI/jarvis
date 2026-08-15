@@ -4,7 +4,7 @@ A floating, Messenger-style AI assistant bubble for Windows — powered by your 
 
 Jarvis sits on top of whatever you're doing as a small draggable orb. Click it and Claude can see your screen (when you allow it), hold multiple parallel conversations, read the context folders *you* point it at, and — with your explicit, per-action approval — act: fill web forms, drive native apps, and show you where things are on screen.
 
-> **Status: phase 2 — usable today.**
+> **Status: phase 3 — usable today.**
 > The working app lives in [app/](app/) (a fork of [claude-overlay](https://github.com/shengyanlin/claude-overlay), extended with the first Jarvis features: Messenger-style parallel chats — each its own agent session — conversations that restore transcript-and-all across restarts, local voice input (🎤, faster-whisper), Claude 5 models in the switcher, and user-chosen context folders). The architecture and roadmap below are the output of a deep best-practices research pass — six parallel tracks: shell architecture, agent sessions, browser form-filling, Windows UI Automation, real-time audio, and agent safety. See [docs/BLUEPRINT.md](docs/BLUEPRINT.md) for the full synthesis with sources.
 
 ## Quick start
@@ -79,7 +79,7 @@ Prompt injection through screen and page content is an unsolved problem — publ
 
 1. ~~**Quality of life** — model picker (Claude 5 family), context-folder wiring~~ ✅
 2. ~~**Multi-chat** — Messenger-style parallel chats, per-chat sessions, reopen-recent~~ ✅
-3. **Browser extension** — page-context attach (send the page's text/DOM instead of a screenshot) and job-application form filling with per-field review (Greenhouse, Lever, Workday adapters)
+3. ~~**Browser extension** — page context instead of screenshots, and job-application form filling with per-field review~~ ✅ (see [extension/](extension/))
 4. **Tauri shell** — installer, auto-update, translucent-when-collapsed orb
 5. **"Show me where" + native-app control** — highlight overlay, UIA actions, watch mode
 6. **Meeting copilot** — live local transcription with visible-recording consent UX
