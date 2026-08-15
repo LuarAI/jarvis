@@ -9,8 +9,10 @@ page without a click on the approval card.
 
 import asyncio
 import json
+import os
 import socket
 import struct
+import sys
 import threading
 import time
 
@@ -137,6 +139,64 @@ class TestBridge:
     def test_stop_removes_the_token_file(self, bridge, tmp_path):
         bridge.stop()
         assert not (tmp_path / "ipc.json").exists()
+
+
+class TestPublicationOwnership:
+    """Two overlay instances used to fight over ipc.json: the last one to start won,
+    and when IT exited the proxies were left dialling a dead port forever — the
+    "extension isn't connected" with nothing wrong in the browser."""
+
+    def test_stale_record_is_reclaimed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(browser_bridge, "IPC_DIR", str(tmp_path))
+        monkeypatch.setattr(browser_bridge, "IPC_FILE", str(tmp_path / "ipc.json"))
+        (tmp_path / "ipc.json").write_text(
+            json.dumps({"port": 1, "token": "x", "pid": 999999}), "utf-8")  # dead pid
+        b = browser_bridge.BrowserBridge()
+        assert b.start()
+        try:
+            assert b.owns_publication is True
+            rec = json.loads((tmp_path / "ipc.json").read_text("utf-8"))
+            assert rec["port"] == b.port and rec["pid"] == os.getpid()
+        finally:
+            b.stop()
+
+    def test_live_owner_is_left_alone(self, tmp_path, monkeypatch):
+        import subprocess
+        monkeypatch.setattr(browser_bridge, "IPC_DIR", str(tmp_path))
+        monkeypatch.setattr(browser_bridge, "IPC_FILE", str(tmp_path / "ipc.json"))
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        b = browser_bridge.BrowserBridge()
+        try:
+            (tmp_path / "ipc.json").write_text(
+                json.dumps({"port": 2, "token": "y", "pid": other.pid}), "utf-8")
+            assert b.start()
+            assert b.owns_publication is False       # stood down for the live overlay
+            rec = json.loads((tmp_path / "ipc.json").read_text("utf-8"))
+            assert rec["port"] == 2                  # untouched
+        finally:
+            b.stop()
+            other.kill()
+
+    def test_stop_does_not_delete_another_overlays_record(self, tmp_path, monkeypatch):
+        import subprocess
+        monkeypatch.setattr(browser_bridge, "IPC_DIR", str(tmp_path))
+        monkeypatch.setattr(browser_bridge, "IPC_FILE", str(tmp_path / "ipc.json"))
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            (tmp_path / "ipc.json").write_text(
+                json.dumps({"port": 2, "token": "y", "pid": other.pid}), "utf-8")
+            b = browser_bridge.BrowserBridge()
+            b.start()
+            b.stop()
+            assert (tmp_path / "ipc.json").exists()  # the live overlay keeps its link
+        finally:
+            other.kill()
+
+    def test_pid_alive_detects_dead_processes(self):
+        assert browser_bridge.BrowserBridge._pid_alive(os.getpid()) is True
+        assert browser_bridge.BrowserBridge._pid_alive(999999) is False
+        assert browser_bridge.BrowserBridge._pid_alive(None) is False
+        assert browser_bridge.BrowserBridge._pid_alive(-1) is False
 
 
 # ── the SDK tools ────────────────────────────────────────────────────────────

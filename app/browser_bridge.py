@@ -110,9 +110,10 @@ class BrowserBridge:
             self._sock.bind(("127.0.0.1", 0))
             self._sock.listen(4)
             self.port = self._sock.getsockname()[1]
-            self._publish()
+            self.owns_publication = self._guard_publication()
             self._running = True
             threading.Thread(target=self._accept_loop, daemon=True).start()
+            threading.Thread(target=self._watch_publication, daemon=True).start()
             return True
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
@@ -120,10 +121,67 @@ class BrowserBridge:
 
     def _publish(self):
         os.makedirs(IPC_DIR, exist_ok=True)
-        tmp = IPC_FILE + ".tmp"
+        tmp = IPC_FILE + ".%d.tmp" % os.getpid()
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"port": self.port, "token": self.token, "pid": os.getpid()}, f)
         os.replace(tmp, IPC_FILE)
+
+    @staticmethod
+    def _published_pid():
+        """The pid currently advertised in ipc.json, or None."""
+        try:
+            with open(IPC_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get("pid")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _pid_alive(pid):
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+        try:                            # Windows: OpenProcess via ctypes, no psutil dep
+            import ctypes
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED
+            if not h:
+                return False
+            ctypes.windll.kernel32.CloseHandle(h)
+            return True
+        except Exception:
+            try:
+                os.kill(pid, 0)
+                return True
+            except Exception:
+                return False
+
+    def _guard_publication(self):
+        """Keep ipc.json pointing at THIS overlay while we're the only live one.
+
+        Two overlays used to fight over the file: whichever started last won, and
+        when it exited the proxies were left dialling a dead port forever — the
+        "extension isn't connected" that no console showed, because nothing was
+        wrong in the browser at all. Now: we refuse to steal the file from a LIVE
+        overlay at startup, and we re-publish if a dead one's record replaced ours."""
+        pid = self._published_pid()
+        if pid == os.getpid():
+            return True
+        if self._pid_alive(pid):
+            return False                # another overlay owns the bridge; leave it be
+        self._publish()                 # stale record (crashed/exited) → reclaim
+        return True
+
+    def _watch_publication(self):
+        """Re-check every few seconds: if the overlay that owned ipc.json exited (or
+        never existed), take over so the extension can find us. Cheap — one small
+        read plus, rarely, an OpenProcess."""
+        while self._running:
+            time.sleep(5.0)
+            try:
+                if not self.connected:
+                    self.owns_publication = self._guard_publication()
+            except Exception:
+                pass
 
     def stop(self):
         self._running = False
@@ -136,7 +194,10 @@ class BrowserBridge:
             except Exception:
                 pass
         try:
-            os.remove(IPC_FILE)      # a stale file would point the proxy at a dead port
+            # Remove the pointer only if it's OURS — deleting another live overlay's
+            # record would cut its browser link when this instance happens to exit.
+            if self._published_pid() == os.getpid():
+                os.remove(IPC_FILE)
         except Exception:
             pass
 

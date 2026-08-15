@@ -104,13 +104,36 @@ def connect_overlay():
         return None
 
 
+def connect_overlay_retrying(stop, tries=20, delay=1.0):
+    """Keep trying to reach the overlay. Chrome starts this proxy as soon as the
+    browser launches, which is routinely BEFORE Jarvis is running (or while it is
+    restarting) — giving up on the first refusal left a live extension permanently
+    unable to reach a perfectly healthy overlay."""
+    for _ in range(tries):
+        if stop.is_set():
+            return None
+        s = connect_overlay()
+        if s is not None:
+            return s
+        time.sleep(delay)
+    return None
+
+
 def main():
     _binary_stdio()
-    sock = connect_overlay()
     stop = threading.Event()
+    sock = connect_overlay_retrying(stop, tries=3, delay=0.5)
+
+    # Guarded by this so the reader thread and the Chrome loop agree on the socket
+    # when the overlay restarts underneath us.
+    state = {"sock": sock}
+    lock = threading.Lock()
 
     def pump_app_to_chrome(s):
-        """Overlay → Chrome (requests like read_page/fill_fields, plus replies)."""
+        """Overlay → Chrome (requests like read_page/fill_fields, plus replies).
+        When the overlay goes away we do NOT kill the proxy: Chrome would have to
+        respawn it, and until it did the extension looked dead. We just drop the
+        socket and let the reconnector pick the overlay back up."""
         try:
             while not stop.is_set():
                 msg = recv_app(s)
@@ -120,34 +143,62 @@ def main():
         except Exception as e:
             log("app pump ended:", type(e).__name__, e)
         finally:
-            stop.set()
+            with lock:
+                if state["sock"] is s:
+                    state["sock"] = None
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def reconnector():
+        """Re-attach to the overlay after it restarts (new port every launch)."""
+        while not stop.is_set():
+            time.sleep(1.5)
+            with lock:
+                have = state["sock"] is not None
+            if have:
+                continue
+            s = connect_overlay()
+            if s is not None:
+                with lock:
+                    state["sock"] = s
+                threading.Thread(target=pump_app_to_chrome, args=(s,), daemon=True).start()
+                log("reconnected to the overlay")
 
     if sock is not None:
         threading.Thread(target=pump_app_to_chrome, args=(sock,), daemon=True).start()
+    threading.Thread(target=reconnector, daemon=True).start()
 
     # Chrome → overlay (replies from the extension, and its hello)
     while not stop.is_set():
         msg = read_chrome()
         if msg is None:
             break
-        if sock is None:                       # overlay wasn't up when we started
-            sock = connect_overlay()
-            if sock is not None:
-                threading.Thread(target=pump_app_to_chrome, args=(sock,), daemon=True).start()
+        with lock:
+            s = state["sock"]
+        if s is None:                          # overlay wasn't up (or restarted)
+            s = connect_overlay_retrying(stop, tries=3, delay=0.4)
+            if s is not None:
+                with lock:
+                    state["sock"] = s
+                threading.Thread(target=pump_app_to_chrome, args=(s,), daemon=True).start()
             else:
                 if msg.get("id") is not None:
                     write_chrome({"id": msg["id"], "ok": False,
-                                  "error": "Jarvis isn't running."})
+                                  "error": "Jarvis isn't running (or is still starting)."})
                 continue
         try:
-            send_app(sock, msg)
+            send_app(s, msg)
         except Exception as e:
             log("send to app failed:", type(e).__name__, e)
+            with lock:
+                if state["sock"] is s:
+                    state["sock"] = None
             try:
-                sock.close()
+                s.close()
             except Exception:
                 pass
-            sock = None
     stop.set()
 
 
