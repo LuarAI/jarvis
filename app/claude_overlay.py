@@ -427,17 +427,19 @@ class Overlay:
             except Exception:
                 pass
 
-    def close_chat(self):
-        """Close the ACTIVE chat (💬 menu). Its agent session ends; the transcript is
-        gone from the UI but the conversation stays resumable (💬 → Reopen) as long as
-        a turn completed. The last remaining chat can't be closed — that's Clear."""
-        v = self._active
-        if len(self._views) <= 1:
+    def close_chat(self, v=None):
+        """Close a chat (defaults to the active one). Its agent session ends; the
+        transcript is gone from the UI but the conversation stays resumable (☰ →
+        Reopen) as long as a turn completed. The last remaining chat can't be closed —
+        that's Clear."""
+        v = v if v is not None else self._active
+        if len(self._views) <= 1 or v not in self._views:
             self.add_sys("💬 This is the only chat — use Clear to start over.")
             return
-        idx = self._views.index(v)
-        target = self._views[idx - 1] if idx > 0 else self._views[1]
-        self.switch_chat(target)
+        if v is self._active:
+            idx = self._views.index(v)
+            target = self._views[idx - 1] if idx > 0 else self._views[1]
+            self.switch_chat(target)
         self._views.remove(v)
         if v._compact_anim_after is not None:
             try:
@@ -1245,6 +1247,9 @@ class Overlay:
                                    font=self.f_small, anchor="w", cursor="hand2")
         self.statusline.pack(side="left", padx=(self.px(16), self.px(6)), pady=(0, self.px(6)))
         self.statusline.bind("<Button-1>", self._model_menu)
+        self.web_chip = tk.Label(sl, text="🌐", bg=T["bg"], fg=T["accent"],
+                                 font=self.f_small, cursor="hand2")
+        self.web_chip.bind("<Button-1>", self._web_chip_click)   # packed by _paint_web_chip
         self.busy_lbl = tk.Label(sl, text="", bg=T["bg"], fg=T["accent"],
                                  font=self.f_small, anchor="e")
         self.busy_lbl.pack(side="right", padx=(0, self.px(16)), pady=(0, self.px(6)))
@@ -1676,6 +1681,9 @@ class Overlay:
             snip = (v.first_prompt or "").strip().replace("\n", " ")
             label = f"{mark}{v.name}" + (f" — {snip[:32]}" if snip else "") + busy
             items.append((label, (lambda vv=v: self.switch_chat(vv))))
+            if len(self._views) > 1:      # close ANY chat from the list, not just the open one
+                items.append((f"        🗑  Close {v.name}",
+                              (lambda vv=v: self.close_chat(vv))))
         items.append(("＋  New chat   (Ctrl+N)", self.new_chat))
         if len(self._views) > 1:
             items.append(("✕  Close this chat", self.close_chat))
@@ -1684,7 +1692,17 @@ class Overlay:
             name = (rec.get("name") or "conversation").strip()[:32]
             items.append((f"↺  Reopen: {name}  ({age} ago)",
                           (lambda r=rec: self.reopen_session(r))))
+            items.append((f"🗑  Delete: {name}",
+                          (lambda r=rec: self.delete_recent(r))))
         return items
+
+    def delete_recent(self, rec):
+        """Remove a saved conversation from the ☰ list. The CLI's own transcript on
+        disk is untouched (that's Claude Code's store, not ours) — this forgets our
+        pointer to it, which is what "delete this chat" means from the list."""
+        name = (rec.get("name") or "conversation").strip()[:40]
+        self._forget_recent(rec.get("id"))
+        self.add_sys(f"🗑 Removed “{name}” from your conversations.")
 
     def toggle_chat_list(self):
         """☰ (top-left): swap the transcript for a full-panel conversation list — the
@@ -1789,6 +1807,27 @@ class Overlay:
         self._update_user_config("VOICE_DEVICE", value)
         self.add_sys(f"🎙 Microphone: {label}. Applies to the next recording — click "
                      "the mic and watch the level bar move to confirm it's live.")
+
+    def _armed_tab_note(self):
+        """A one-line note appended to a send while a browser tab is armed.
+
+        Arming a tab IS the user's "look here" gesture — having to also TYPE "read
+        this page" was the wrong contract. This tells the model which page is on the
+        table (title + url only, never content) so it calls browser_read_page on its
+        own. Cheap and non-blocking: a short timeout, and any failure yields nothing."""
+        try:
+            if not (self.bridge and self.bridge.connected):
+                return ""
+            res = self.bridge.request("armed_status", timeout=2.0)
+            if not (isinstance(res, dict) and res.get("armed")):
+                return ""
+            title = str(res.get("title") or "").strip()[:120]
+            url = str(res.get("url") or "").strip()[:300]
+            return (f"\n\n[The user has armed a browser tab for you: \"{title}\" — {url}. "
+                    "If this message relates to that page, call browser_read_page to see "
+                    "it (its text and form fields) instead of asking them to paste it.]")
+        except Exception:
+            return ""
 
     # ── browser form filling: propose → USER APPROVES → fill ──
     def _propose_fill(self, fills):
@@ -3755,15 +3794,17 @@ class Overlay:
             label += (f"   🖼×{n}" if n > 1 else "   🖼")
         if text and not self._cur.first_prompt:   # 💬-menu snippet + Reopen-record name
             self._cur.first_prompt = text[:60]
+        browser_note = self._armed_tab_note()     # arming a tab IS the "look here" gesture
         self.add_user(label)
         thumb_paths = [s["path"] for s in (shots or [])] + list(images)
         if thumb_paths:                  # show WHAT was captured, not just that something was
             self._add_shot_thumbs(thumb_paths)
+        body = (text + browser_note) if browser_note else text
         if IMAGE_INPUT == "inline":
             paths = [s["path"] for s in (shots or [])] + list(images)
-            self.worker.ask(self._inline_text(text, shots, images), paths)
+            self.worker.ask(self._inline_text(body, shots, images), paths)
         else:
-            self.worker.ask(self._build_prompt(text, shots, images), [])
+            self.worker.ask(self._build_prompt(body, shots, images), [])
         self._set_busy(True)
 
     def _inline_text(self, text, shots, images):
@@ -4311,12 +4352,36 @@ class Overlay:
         p = f"{self._ctx_pct:.0f}%" if isinstance(self._ctx_pct, (int, float)) else "—"
         # version goes last so it clips first if the window is narrow; ⬆ flags an update
         ver = f"v{__version__}" + ("  ⬆" if self._update_available else "")
-        # 🌐 while the Chrome extension is connected, so "can it see my browser?" is
-        # answerable at a glance instead of by asking and getting a guess.
-        web = "   ·   🌐" if getattr(self, "bridge", None) and self.bridge.connected else ""
         self.statusline.configure(
-            text=f"{self._model or 'Claude'} ▾   ·   context {p}{web}   ·   {ver}",
-            fg=T["muted"])
+            text=f"{self._model or 'Claude'} ▾   ·   context {p}   ·   {ver}", fg=T["muted"])
+        # The browser indicator is its OWN widget, not text inside the model label —
+        # clicking it used to open the model switcher, which read as a bug.
+        self._paint_web_chip()
+
+    def _paint_web_chip(self):
+        """🌐 shows only while the Chrome extension is connected; clicking it reports
+        which tab is armed (or how to arm one)."""
+        chip = getattr(self, "web_chip", None)
+        if chip is None:
+            return
+        on = bool(getattr(self, "bridge", None) and self.bridge.connected)
+        try:
+            if on and not chip.winfo_ismapped():
+                chip.pack(side="left", padx=(0, self.px(6)), pady=(0, self.px(6)))
+            elif not on and chip.winfo_ismapped():
+                chip.pack_forget()
+        except Exception:
+            pass
+
+    def _web_chip_click(self, _e=None):
+        res = self.bridge.request("armed_status", timeout=3.0) if self.bridge else {}
+        if isinstance(res, dict) and res.get("armed"):
+            self.add_sys(f"🌐 Armed tab: {res.get('title') or ''}\n{res.get('url') or ''}\n"
+                         "Just ask about it — I'll read it automatically.")
+        else:
+            self.add_sys("🌐 Chrome extension connected, but no tab is armed. Press "
+                         "Ctrl+Shift+J on the page you want me to see (or click the "
+                         "Jarvis toolbar icon).")
 
     # ── compaction animation (mirrors the Claude Code CLI's /compact spinner) ──
     def _start_compact_anim(self):

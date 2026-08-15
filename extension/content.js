@@ -203,7 +203,11 @@
   }
 
   function fillOne(ref, value) {
-    const el = FIELDS.get(ref);
+    // The service worker namespaces refs across frames as "<frameId>:<ref>"; each
+    // frame only knows its own bare ids. A ref for another frame simply isn't here,
+    // and that frame handles it in parallel.
+    const bare = String(ref).includes(":") ? String(ref).split(":").pop() : String(ref);
+    const el = FIELDS.get(bare);
     if (!el || !el.isConnected) return { ref, ok: false, error: "field is gone (page changed?)" };
     if (isForbidden(el) || !isVisible(el)) return { ref, ok: false, error: "field is not fillable" };
     if (isSubmitter(el)) return { ref, ok: false, error: "refusing to touch a submit control" };
@@ -261,12 +265,17 @@
                   fields: scan.fields, excluded_counts: scan.excluded_counts });
       } else if (msg.action === "fill_fields") {
         const results = [];
-        const items = (msg.params && msg.params.fills) || [];
+        // Only the fills whose refs live in THIS frame (see fillOne): every frame gets
+        // the same message and answers for its own fields.
+        const items = ((msg.params && msg.params.fills) || []).filter((it) => {
+          const bare = String(it.ref).includes(":") ? String(it.ref).split(":").pop() : String(it.ref);
+          return FIELDS.has(bare);
+        });
         let i = 0;
         const step = () => {
           if (i >= items.length) { respond({ ok: true, results }); return; }
           const it = items[i++];
-          results.push(fillOne(it.ref, it.value));
+          results.push(Object.assign(fillOne(it.ref, it.value), { ref: it.ref }));
           setTimeout(step, 90);        // let per-field validators and dependent fields catch up
         };
         step();

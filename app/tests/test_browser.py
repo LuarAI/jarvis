@@ -343,3 +343,81 @@ class TestApprovalGate:
 def types_click(x):
     import types as _t
     return _t.SimpleNamespace(x=x, y=5)
+
+
+# ── armed-tab awareness: no need to say "read this page" ─────────────────────
+
+class TestArmedTabNote:
+
+    def _armed(self, overlay, monkeypatch, armed=True, title="Senior Dev at Acme",
+               url="https://boards.greenhouse.io/acme/jobs/1"):
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
+        monkeypatch.setattr(overlay.bridge, "request",
+                            lambda a, p=None, timeout=None: (
+                                {"ok": True, "armed": armed, "title": title, "url": url}
+                                if a == "armed_status" else {"ok": True}))
+
+    def test_note_names_the_armed_page(self, overlay, monkeypatch):
+        self._armed(overlay, monkeypatch)
+        note = overlay._armed_tab_note()
+        assert "Senior Dev at Acme" in note and "greenhouse.io" in note
+        assert "browser_read_page" in note
+
+    def test_no_note_when_nothing_armed(self, overlay, monkeypatch):
+        self._armed(overlay, monkeypatch, armed=False)
+        assert overlay._armed_tab_note() == ""
+
+    def test_no_note_when_browser_disconnected(self, overlay, monkeypatch):
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: False))
+        assert overlay._armed_tab_note() == ""
+
+    def test_bridge_failure_never_breaks_a_send(self, overlay, monkeypatch):
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
+        def boom(*a, **k):
+            raise RuntimeError("bridge exploded")
+        monkeypatch.setattr(overlay.bridge, "request", boom)
+        assert overlay._armed_tab_note() == ""      # degrades to nothing, never raises
+
+    def test_send_appends_the_note(self, overlay, monkeypatch):
+        monkeypatch.setattr(co.authstate, "dead_reason", lambda: None)
+        self._armed(overlay, monkeypatch)
+        overlay.auto_shot = False
+        overlay._ph_out()
+        overlay.entry.insert("1.0", "is this worth applying to?")
+        overlay._send_or_stop()
+        sent = [a for (n, a) in overlay.worker.calls if n == "ask"][0][0]
+        assert sent.startswith("is this worth applying to?")
+        assert "armed a browser tab" in sent
+
+
+# ── deleting conversations from the ☰ list ───────────────────────────────────
+
+class TestDeleteChats:
+
+    def test_delete_removes_a_saved_conversation(self, overlay):
+        co._save_state(recent_sessions=[
+            {"id": "keep-me", "ts": time.time(), "cwd": co.WORKING_DIR, "name": "keep"},
+            {"id": "drop-me", "ts": time.time(), "cwd": co.WORKING_DIR, "name": "drop"}])
+        overlay.delete_recent({"id": "drop-me", "name": "drop"})
+        ids = [r["id"] for r in co._load_state()["recent_sessions"]]
+        assert ids == ["keep-me"]
+        assert "Removed" in overlay.chat.get("1.0", "end")
+
+    def test_list_offers_delete_for_each_saved_conversation(self, overlay):
+        co._save_state(recent_sessions=[
+            {"id": "s1", "ts": time.time(), "cwd": co.WORKING_DIR, "name": "cover letter"}])
+        labels = [l for l, _ in overlay._chats_items()]
+        assert any(l.startswith("🗑") and "cover letter" in l for l in labels)
+
+    def test_list_offers_close_for_each_open_chat(self, overlay):
+        overlay.new_chat()
+        labels = [l for l, _ in overlay._chats_items()]
+        closes = [l for l in labels if l.strip().startswith("🗑  Close")]
+        assert len(closes) == 2                      # one per open chat
+
+    def test_close_a_background_chat_directly(self, overlay):
+        v1 = overlay._views[0]
+        v2 = overlay.new_chat()                      # v2 active
+        overlay.close_chat(v1)                       # close the OTHER one
+        assert v1 not in overlay._views
+        assert overlay._active is v2                 # the active chat didn't move

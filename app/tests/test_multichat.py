@@ -186,8 +186,10 @@ class TestChatsMenu:
         v1 = overlay._views[0]
         v2 = overlay.new_chat()
         v1.unread = True
-        labels = [lbl for lbl, _ in overlay._chats_items()]
-        assert any(lbl.startswith("● ") and "Chat 1" in lbl for lbl in labels)
+        # chat numbers keep climbing across the shared-fixture session, so assert on
+        # the views' real names rather than hardcoding "Chat 1"
+        labels = [lbl for lbl, _ in overlay._chats_items() if "Close" not in lbl]
+        assert any(lbl.startswith("● ") and v1.name in lbl for lbl in labels)
         assert any(lbl.startswith("✓ ") and v2.name in lbl for lbl in labels)
 
     def test_new_and_close_rows_wired(self, overlay):

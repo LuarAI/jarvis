@@ -3,7 +3,7 @@
   "name": "Jarvis Bridge",
   "version": "0.1.0",
   "description": "Lets the Jarvis overlay read the page you're on and fill forms you approve, field by field.",
-  "permissions": ["nativeMessaging", "scripting", "activeTab", "storage", "tabs"],
+  "permissions": ["nativeMessaging", "scripting", "activeTab", "storage", "tabs", "webNavigation"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
