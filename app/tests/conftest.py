@@ -72,6 +72,31 @@ def _overlay_singleton():
 
     mp = pytest.MonkeyPatch()
     mp.setattr(co, "ClaudeWorker", FakeWorker)
+    # Never let the suite reach the developer's REAL browser. Without this the
+    # overlay under test opens a live bridge, a running Chrome connects to it, and
+    # assertions start depending on whatever tab happens to be open — which is
+    # exactly how "send with nothing collected" picked up a LinkedIn page.
+    class _OfflineBridge:
+        connected = False
+
+        def __init__(self, *a, **k):
+            self.token, self.port = "test", 0
+            self.owns_publication = False
+
+        def start(self):
+            return False
+
+        def stop(self):
+            pass
+
+        def request(self, action, params=None, timeout=None):
+            return {"error": "bridge disabled in tests"}
+    # Patch the NAME the Overlay constructs through, not the class in browser_bridge —
+    # the bridge's own tests (ownership, pid liveness) need the real implementation.
+    import types as _types
+    mp.setattr(co, "browser_bridge",
+               _types.SimpleNamespace(BrowserBridge=_OfflineBridge,
+                                      IPC_FILE=co.browser_bridge.IPC_FILE))
     mp.setattr(co.Overlay, "_register_hotkey", lambda self: None)
     mp.setattr(co.Overlay, "_check_for_update", lambda self: None)
     # Point the persisted-UI-state store at a throwaway path: the suite must neither
@@ -137,6 +162,8 @@ def _clean_overlay(ov):
         ov._views[0].draft = ""
         ov._views[0].collecting = False    # the 📄 collector must not leak between tests
         ov._views[0].collected.clear()
+        ov._deleted_ids.clear()            # tombstones from a delete test
+        ov._hide_undo()                    # a leftover Undo toast steals layout space
         ov._views[0].sent_digests.clear()
         ov._refresh_chats_chip()
         co._save_state(model=None)      # a persisted model pick must not leak between tests

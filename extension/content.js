@@ -108,7 +108,10 @@
     return "";
   }
 
-  const FIELD_SEL = "input,textarea,select,[contenteditable=''],[contenteditable='true']";
+  const FIELD_SEL = "input,textarea,select,[contenteditable=''],[contenteditable='true']," +
+    // Workday-style listboxes are BUTTONS, so they'd never be found by an
+    // input/select scan — but they're fields as far as the user is concerned.
+    "[aria-haspopup='listbox'],[role='combobox']";
 
   /* Shadow-root accessor.
    *
@@ -157,6 +160,9 @@
     if (tag === "select") return "select";
     if (tag === "textarea") return "textarea";
     if (el.isContentEditable) return "contenteditable";
+    // a listbox-backed control (Workday) behaves like a select to the user even
+    // though it's a button — say so, or the model proposes free text for it
+    if (isCombobox(el)) return "combobox";
     const t = (el.type || "text").toLowerCase();
     if (["checkbox", "radio", "file", "email", "tel", "url", "number", "date"].includes(t)) return t;
     return "text";
@@ -500,6 +506,73 @@
     else el.removeAttribute("data-jarvis-hl");
   }
 
+  /* Workday-style listbox: a <button aria-haspopup="listbox">, never a <select>.
+   * You cannot assign a value — you must open the popup and CLICK the option, and
+   * the options don't exist in the DOM until it opens. Hence the async dance:
+   * click, wait for the listbox, match the text, click it. Returns a promise. */
+  function isCombobox(el) {
+    try {
+      return el.getAttribute("aria-haspopup") === "listbox"
+        || el.getAttribute("role") === "combobox"
+        || (el.tagName === "BUTTON" && !!el.getAttribute("data-automation-id"));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function fillCombobox(el, value, ref) {
+    return new Promise((resolve) => {
+      const want = String(value).trim().toLowerCase();
+      try {
+        el.scrollIntoView({ block: "center" });
+        el.click();
+      } catch (e) {
+        resolve({ ref, ok: false, error: "couldn't open the list" });
+        return;
+      }
+      let waited = 0;
+      const OPT = "[role='option'], [data-automation-id='promptOption'], "
+                + "[data-automation-id='menuItem'], li[role='option']";
+      const poll = () => {
+        let opts = [];
+        try { opts = Array.from(document.querySelectorAll(OPT)); } catch (e) { /* none */ }
+        const visible = opts.filter((o) => {
+          try { return o.getBoundingClientRect().height > 0; } catch (e) { return false; }
+        });
+        if (visible.length) {
+          const txt = (o) => (o.innerText || o.textContent || "").replace(/\s+/g, " ").trim();
+          const hit = visible.find((o) => txt(o).toLowerCase() === want)
+            || visible.find((o) => txt(o).toLowerCase().includes(want))
+            || visible.find((o) => want.includes(txt(o).toLowerCase()) && txt(o).length > 2);
+          if (hit) {
+            try {
+              hit.scrollIntoView({ block: "nearest" });
+              hit.click();
+              resolve({ ref, ok: true, value: txt(hit).slice(0, 200) });
+            } catch (e) {
+              resolve({ ref, ok: false, error: "couldn't click the option" });
+            }
+            return;
+          }
+          if (waited >= 1500) {           // list is open but nothing matches
+            try { el.click(); } catch (e) { /* leave it */ }   // close it again
+            resolve({ ref, ok: false,
+                      error: `no option matching "${value}" (saw: ` +
+                             visible.slice(0, 4).map(txt).join(", ") + ")" });
+            return;
+          }
+        }
+        if (waited >= 3000) {
+          resolve({ ref, ok: false, error: "the option list never opened" });
+          return;
+        }
+        waited += 150;
+        setTimeout(poll, 150);
+      };
+      setTimeout(poll, 200);
+    });
+  }
+
   function fillOne(ref, value) {
     // The service worker namespaces refs across frames as "<frameId>:<ref>"; each
     // frame only knows its own bare ids. A ref for another frame simply isn't here,
@@ -513,6 +586,14 @@
       highlight(el, "pending");
       el.scrollIntoView({ block: "center", behavior: "smooth" });
       const kind = kindOf(el);
+      // Workday and friends: not a <select>, so it must be opened and clicked.
+      // Returns a promise — the caller awaits it.
+      if (kind !== "select" && isCombobox(el)) {
+        return fillCombobox(el, value, ref).then((r) => {
+          highlight(el, r.ok ? "filled" : null);
+          return r;
+        });
+      }
       el.focus();
       if (kind === "checkbox" || kind === "radio") {
         const want = value === true || /^(true|yes|on|checked|1)$/i.test(String(value));
@@ -526,6 +607,30 @@
         if (!hit) return { ref, ok: false, error: "no matching option" };
         nativeSet(el, hit.value);
         el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (kind === "file") {
+        /* CV upload. input.files is assignable via a DataTransfer, which is the
+         * standard (and only) way to attach a file programmatically. The bytes come
+         * from the overlay as base64 — the user picked the file there, so this is
+         * their own document, attached on their behalf after they approved it. */
+        const f = value && value.__file;
+        if (!f || !f.b64) return { ref, ok: false, error: "no file provided" };
+        const bin = atob(f.b64);
+        const buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        const dt = new DataTransfer();
+        dt.items.add(new File([buf], f.name || "document.pdf",
+                              { type: f.type || "application/octet-stream" }));
+        el.files = dt.files;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        // drag-and-drop uploaders listen for `drop` rather than the input's change
+        try {
+          const zone = el.closest("[class*='drop'], [class*='upload']") || el.parentElement;
+          if (zone) {
+            const ev = new DragEvent("drop", { bubbles: true, dataTransfer: dt });
+            zone.dispatchEvent(ev);
+          }
+        } catch (e) { /* plain input — the change above already did it */ }
       } else if (kind === "contenteditable") {
         document.execCommand("insertText", false, String(value));
       } else {
@@ -719,8 +824,15 @@
         const step = () => {
           if (i >= items.length) { respond({ ok: true, results }); return; }
           const it = items[i++];
-          results.push(Object.assign(fillOne(it.ref, it.value), { ref: it.ref }));
-          setTimeout(step, 90);        // let per-field validators and dependent fields catch up
+          // fillOne returns a plain object OR a promise (comboboxes must open a
+          // popup and click an option). Promise.resolve normalises both.
+          Promise.resolve(fillOne(it.ref, it.value)).then((r) => {
+            results.push(Object.assign(r || {}, { ref: it.ref }));
+          }).catch((e) => {
+            results.push({ ref: it.ref, ok: false, error: String(e && e.message || e) });
+          }).then(() => {
+            setTimeout(step, 90);      // let validators and dependent fields catch up
+          });
         };
         step();
         return true;                   // async respond

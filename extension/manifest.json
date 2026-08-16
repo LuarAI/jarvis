@@ -14,5 +14,8 @@
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_title": "Jarvis Bridge — connected to the Jarvis overlay" }
+  "action": {
+    "default_title": "Jarvis Bridge",
+    "default_popup": "popup.html"
+  }
 }

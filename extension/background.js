@@ -27,7 +27,32 @@ async function setConnectedBadge(on) {
   } catch (e) { /* badge is cosmetic */ }
 }
 
+/* The hard switch. While disabled we do not hold a native port at all, so no page
+ * content can reach the overlay however it asks — this is a disconnect, not a
+ * politeness. Persisted, so it survives browser restarts. */
+let enabled = true;
+
+async function loadEnabled() {
+  const { enabled: e } = await chrome.storage.local.get("enabled");
+  enabled = (e !== false);            // default ON for a freshly installed extension
+  return enabled;
+}
+
+async function setEnabled(value) {
+  enabled = !!value;
+  await chrome.storage.local.set({ enabled });
+  if (enabled) {
+    connect();
+  } else {
+    try { if (port) port.disconnect(); } catch (e) { /* already gone */ }
+    port = null;
+    setConnectedBadge(false);
+  }
+  return enabled;
+}
+
 function connect() {
+  if (!enabled || port) return;
   try {
     port = chrome.runtime.connectNative(HOST);
   } catch (e) {
@@ -45,9 +70,25 @@ function connect() {
 }
 
 function schedule() {
+  if (!enabled) return;               // off means off: no reconnect loop
   setTimeout(connect, backoff);
   backoff = Math.min(backoff * 2, 30000);
 }
+
+// The popup talks to us over runtime messaging (it cannot hold the native port).
+chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
+  if (!msg || !msg.popup) return;
+  (async () => {
+    if (msg.popup === "setEnabled") await setEnabled(msg.value);
+    let tab = "";
+    try {
+      const t = await targetTab();
+      tab = t ? (t.title || t.url || "") : "";
+    } catch (e) { /* no usable tab */ }
+    respond({ enabled, connected: !!port, tab: String(tab).slice(0, 80) });
+  })();
+  return true;                        // async respond
+});
 
 function send(obj) {
   try { if (port) port.postMessage(obj); } catch (e) { /* dropped; reconnect will follow */ }
@@ -252,11 +293,8 @@ async function handle(msg) {
   }
 }
 
-// Clicking the toolbar icon just reports status — there is no mode to toggle.
-chrome.action.onClicked.addListener(() => {
-  send({ type: "event", event: "icon_clicked" });
-});
-
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
-connect();
+// The toolbar icon opens the popup (declared in the manifest), which owns the
+// on/off switch — no click handler here.
+chrome.runtime.onStartup.addListener(() => loadEnabled().then(connect));
+chrome.runtime.onInstalled.addListener(() => loadEnabled().then(connect));
+loadEnabled().then(connect);

@@ -117,7 +117,12 @@ def build_tools(bridge, propose_fill):
                        "type": "object",
                        "properties": {
                            "ref": {"type": "string", "description": "field ref from browser_read_page"},
-                           "value": {"type": "string", "description": "value to type"},
+                           "value": {"type": "string",
+                                     "description": "value to type. For a FILE field "
+                                                    "(kind 'file', e.g. a CV upload) use "
+                                                    "the exact string __FILE__ — the user "
+                                                    "is then asked to pick the document "
+                                                    "themselves; never invent a path."},
                            "why": {"type": "string",
                                    "description": "short reason/source, shown to the user"},
                        },

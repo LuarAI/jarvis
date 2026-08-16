@@ -1290,6 +1290,8 @@ class Overlay:
         self.web_chip = tk.Label(sl, text="🌐", bg=T["bg"], fg=T["accent"],
                                  font=self.f_small, cursor="hand2")
         self.web_chip.bind("<Button-1>", self._web_chip_click)   # packed by _paint_web_chip
+        self.web_chip.bind("<Enter>", self._web_tip_show)
+        self.web_chip.bind("<Leave>", self._web_tip_hide)
         self.busy_lbl = tk.Label(sl, text="", bg=T["bg"], fg=T["accent"],
                                  font=self.f_small, anchor="e")
         self.busy_lbl.pack(side="right", padx=(0, self.px(16)), pady=(0, self.px(6)))
@@ -2452,6 +2454,48 @@ class Overlay:
         self._register_zoomable(c, render)
         return c
 
+    def _resolve_file_fills(self, fills):
+        """Turn any file field into real bytes — by asking YOU for the file.
+
+        The model proposes "attach your CV here"; it never supplies a path and never
+        sees the contents. That keeps a hijacked page from talking Claude into
+        uploading an arbitrary file: the only document that can be attached is one
+        the user just picked in a dialog."""
+        from tkinter import filedialog
+        out = []
+        for f in fills:
+            if not str(f.get("value", "")).startswith("__FILE__"):
+                out.append(f)
+                continue
+            label = f.get("why") or "the requested document"
+            self.add_sys(f"📎 This form wants a file for: {label}")
+            path = filedialog.askopenfilename(
+                parent=self.root, title=f"Choose the file to attach — {label}",
+                filetypes=[("Documents", "*.pdf *.doc *.docx *.txt *.rtf *.odt"),
+                           ("All files", "*.*")])
+            if not path:
+                self.add_sys("📎 Skipped — no file chosen.")
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                if len(data) > 12 * 1024 * 1024:
+                    self.add_err(f"📎 {os.path.basename(path)} is too large to attach "
+                                 "through the browser bridge (12 MB limit).")
+                    continue
+                import mimetypes
+                mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+                out.append(dict(f, value={"__file": {
+                    "name": os.path.basename(path),
+                    "type": mime,
+                    "b64": base64.b64encode(data).decode("ascii"),
+                }}))
+                self.add_sys(f"📎 Attaching {os.path.basename(path)}")
+            except Exception as e:
+                self.add_err(f"📎 Couldn't read {os.path.basename(path)}: "
+                             f"{type(e).__name__}")
+        return out
+
     def _execute_fill(self, btn):
         """User approved: send the fills to the page on a background thread (the
         bridge round-trip must not freeze Tk), then report what actually landed."""
@@ -2459,9 +2503,12 @@ class Overlay:
         self._pending_fill = None
         if not fills:
             return
+        fills = self._resolve_file_fills(fills)   # asks you for any file, on the UI thread
+        if not fills:
+            return
 
         def bg():
-            res = self.bridge.request("fill_fields", {"fills": fills}, timeout=45.0)
+            res = self.bridge.request("fill_fields", {"fills": fills}, timeout=60.0)
             self._app_q.put(("fill_result", (btn, res)))
         threading.Thread(target=bg, daemon=True).start()
 
@@ -4973,16 +5020,101 @@ class Overlay:
                              f"class={b.get('cls') or '—'}")
         self.add_sys("\n".join(lines))
 
-    def _web_chip_click(self, _e=None):
-        res = self.bridge.request("armed_status", timeout=3.0) if self.bridge else {}
+    def _web_status(self):
+        """(title, url) of the tab Jarvis would read, or (None, None). Cached briefly
+        so hovering doesn't hammer the bridge."""
+        now = time.monotonic()
+        if now - getattr(self, "_web_status_at", 0) < 2.0:
+            return getattr(self, "_web_status_cache", (None, None))
+        self._web_status_at = now
+        res = self.bridge.request("armed_status", timeout=2.0) if self.bridge else {}
         if isinstance(res, dict) and res.get("armed"):
-            self.add_sys(f"🌐 Chrome is connected. You're looking at:\n"
-                         f"{res.get('title') or ''}\n{res.get('url') or ''}\n"
-                         "Just ask about it — I read the tab you're on.")
+            out = (str(res.get("title") or "").strip()[:70],
+                   str(res.get("url") or "").strip()[:90])
         else:
-            self.add_sys("🌐 Chrome extension connected, but I can't see a usable tab. "
-                         "Open a normal web page (not chrome:// or the Web Store) and "
-                         "try again.")
+            out = (None, None)
+        self._web_status_cache = out
+        return out
+
+    def _web_tip_show(self, _e=None):
+        """Hover the 🌐 → what Jarvis can see. This used to print into the chat, which
+        was noise you couldn't remove and inconsistent with how 📄 behaves."""
+        self._web_tip_hide()
+        title, url = self._web_status()
+        if title:
+            text = f"Reading the tab you're on:\n{title}\n{url}\n\n(click for options)"
+        else:
+            text = ("Chrome is connected, but this tab can't be read\n"
+                    "(chrome://, the Web Store and PDFs are off limits).\n\n"
+                    "(click for options)")
+        tip = tk.Toplevel(self.root)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=text, bg=T["field"], fg=T["text"], font=self.f_small,
+                 justify="left", anchor="w", padx=self.px(10), pady=self.px(8),
+                 highlightthickness=1, highlightbackground=T["border"]).pack()
+        try:
+            x = self.web_chip.winfo_rootx()
+            y = self.web_chip.winfo_rooty() - tip.winfo_reqheight() - self.px(6)
+            tip.geometry(f"+{x}+{max(0, y)}")
+        except Exception:
+            pass
+        self._web_tip = tip
+
+    def _web_tip_hide(self, _e=None):
+        tip = getattr(self, "_web_tip", None)
+        self._web_tip = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+
+    def _web_chip_click(self, _e=None):
+        """Click the 🌐 → the two things you actually control. The current page is a
+        header, not a picker: Jarvis reads the tab you're viewing, and "use this page"
+        is an ACTION you take, not a mode that silently persists."""
+        self._web_tip_hide()
+        title, _url = self._web_status()
+        v = self._active
+        m = tk.Menu(self.root, tearoff=0, bg=T["field"], fg=T["text"],
+                    activebackground=T["accent"], activeforeground=T["on_accent"], bd=0)
+        m.add_command(label=(title or "no readable tab"), state="disabled")
+        m.add_separator()
+        m.add_command(label="＋  Use this page as context now",
+                      command=self.capture_current_page)
+        m.add_command(label=("■  Stop collecting pages" if v.collecting
+                             else "▶  Collect pages I browse"),
+                      command=self.toggle_collect)
+        m.add_separator()
+        m.add_command(label="Turn the browser link off…", command=self._explain_killswitch)
+        try:
+            x, y = self.root.winfo_pointerxy()
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
+
+    def capture_current_page(self):
+        """Grab the page you're on RIGHT NOW into the queue, without arming the
+        collector — the explicit "use this one" action."""
+        if not (self.bridge and self.bridge.connected):
+            self.add_sys("🌐 The Chrome extension isn't connected.")
+            return
+        v = self._cur
+
+        def bg(view=v):
+            res = self.bridge.request("collect_snapshot", timeout=8.0)
+            self._app_q.put(("collected_once", (view, res)))
+        threading.Thread(target=bg, daemon=True).start()
+        self._set_status("reading the page…")
+
+    def _explain_killswitch(self):
+        """Jarvis can stop ASKING; only Chrome can stop the extension. Say so plainly
+        rather than pretending to a power we don't have."""
+        self.add_sys("🌐 To cut the browser link entirely, click the Jarvis Bridge icon "
+                     "in Chrome's toolbar and switch it off — that closes the "
+                     "connection, so nothing can be read even if I ask. The 📄 toggle "
+                     "here only stops me collecting.")
 
     # ── compaction animation (mirrors the Claude Code CLI's /compact spinner) ──
     def _start_compact_anim(self):
@@ -5341,6 +5473,15 @@ class Overlay:
             self._render_replay(payload)
         elif kind == "collected":
             self._on_collected(payload[0], payload[1])
+        elif kind == "collected_once":
+            # explicit "use this page" — store it even though collecting may be off
+            view, res = payload
+            was, view.collecting = view.collecting, True
+            self._on_collected(view, res)
+            view.collecting = was
+            self._set_status("")
+            title = (res or {}).get("title") if isinstance(res, dict) else None
+            self.add_sys(f"📄 Added to this message: {title or 'the current page'}")
         elif kind == "approval":
             self._render_approval(payload)
         elif kind == "fill_proposal":

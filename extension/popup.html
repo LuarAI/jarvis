@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Jarvis Bridge</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; width: 260px;
+    font: 13px/1.45 -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: #FAF9F5; color: #28261F;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #262624; color: #ECE9E2; }
+    .row { border-color: #3A3A37 !important; }
+    .sub { color: #A9A59B !important; }
+  }
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #C9C6BD; flex: none; }
+  .dot.on { background: #4CAF50; }
+  h1 { font-size: 13px; font-weight: 650; margin: 0; }
+  .sub { font-size: 11.5px; color: #73706A; padding: 0 14px 12px; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 11px 14px; border-top: 1px solid #E5E2D9;
+  }
+  .row label { font-weight: 550; }
+  .hint { font-size: 11px; color: #73706A; padding: 8px 14px 12px; }
+  /* switch */
+  .sw { position: relative; width: 38px; height: 22px; flex: none; }
+  .sw input { opacity: 0; width: 0; height: 0; }
+  .track {
+    position: absolute; inset: 0; background: #C9C6BD; border-radius: 22px;
+    transition: background .15s; cursor: pointer;
+  }
+  .track::before {
+    content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: transform .15s;
+  }
+  input:checked + .track { background: #D97757; }
+  input:checked + .track::before { transform: translateX(16px); }
+  a { color: #D97757; }
+</style>
+
+<header>
+  <span class="dot" id="dot"></span>
+  <h1 id="title">Checking…</h1>
+</header>
+<div class="sub" id="sub"></div>
+
+<div class="row">
+  <label for="enabled">Connect to Jarvis</label>
+  <span class="sw">
+    <input type="checkbox" id="enabled">
+    <span class="track"></span>
+  </span>
+</div>
+
+<!-- The honest framing: this is the hard switch. Off means the native port is
+     closed and no page content can leave the browser, whatever the overlay asks. -->
+<div class="hint" id="hint"></div>
+
+<script src="popup.js"></script>
