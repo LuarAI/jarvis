@@ -134,6 +134,32 @@ class TestAllowToolFlow:
         assert type(res).__name__ == "PermissionResultDeny"
         assert w.ui.empty()
 
+    def test_read_listings_denial_explains_the_approval_path(self):
+        w = _worker("plan")
+        res = _run(w._allow_tool("mcp__jarvis_browser__browser_read_listings", {}, None))
+        assert type(res).__name__ == "PermissionResultDeny"
+        # it must tell the user how to get it, not just refuse
+        assert "Read-only" in res.message and "⚙" in res.message
+
+
+class TestUnlockedModePairsWithCards:
+    """Turning Read-only OFF must land in a mode where our card is authoritative.
+    acceptEdits/bypassPermissions let the CLI approve file edits ITSELF, so the card
+    would never appear for exactly the action it exists to gate."""
+
+    def test_full_mode_is_default_when_approvals_are_on(self, overlay):
+        if co.APPROVE_ACTIONS:
+            assert overlay._full_mode == "default"
+
+    def test_toggle_targets_that_mode(self, overlay, monkeypatch):
+        sent = []
+        monkeypatch.setattr(overlay.worker, "set_permission_mode", lambda m: sent.append(m))
+        overlay.read_only = True
+        overlay.toggle_read_only()
+        assert sent == [overlay._full_mode]
+        if co.APPROVE_ACTIONS:
+            assert sent == ["default"]
+
 
 # ── the card in the UI ───────────────────────────────────────────────────────
 

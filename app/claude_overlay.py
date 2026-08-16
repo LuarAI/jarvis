@@ -294,10 +294,15 @@ class Overlay:
         self.share_visible = SHOW_IN_SCREEN_SHARE_DEFAULT   # True → overlay shows in screen shares
         # self.read_only was set above (worker launch); the toggle flips it via the
         # worker (confirmed async) and each confirmed change is persisted.
-        self._full_mode = (PERMISSION_MODE if PERMISSION_MODE != "plan"
-                           else "bypassPermissions")  # what Read-only OFF returns to: the
-                                                      # configured mode — unless that IS plan,
-                                                      # then the CLI default full-access mode
+        # What Read-only OFF returns to. With approval cards on, "default" is the right
+        # unlocked mode: it routes EVERY action through our permission callback, so you
+        # see an Approve/Reject card. bypassPermissions and acceptEdits let the CLI
+        # approve things itself — the card would never appear for file edits, which is
+        # precisely the case the card exists for.
+        self._full_mode = (PERMISSION_MODE if PERMISSION_MODE not in ("plan",)
+                           else ("default" if APPROVE_ACTIONS else "bypassPermissions"))
+        if APPROVE_ACTIONS and self._full_mode in ("acceptEdits", "bypassPermissions"):
+            self._full_mode = "default"
         self.pending_shot = None
         self.pending_images: list = []
         self._precaptured = None        # (shots, monotonic_ts) grabbed while typing
