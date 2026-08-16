@@ -56,6 +56,64 @@
     })(),
   } : null;
 
+  // 4b. The NEW React app doesn't use /jobs/view/ anchors. Find what the cards
+  //     actually are: currentJobId links, other /jobs/ links, React fiber props,
+  //     and the scroll container that holds the virtualized list.
+  const byPattern = {};
+  for (const [name, sel] of [
+    ["currentJobId links", "a[href*='currentJobId']"],
+    ["any /jobs/ links", "a[href*='/jobs/']"],
+    ["role=listitem", "[role='listitem']"],
+    ["li elements", "li"],
+    ["aria-label anchors", "a[aria-label]"],
+  ]) {
+    const els = [...document.querySelectorAll(sel)];
+    byPattern[name] = {
+      count: els.length,
+      samples: els.slice(0, 5).map((e) => ({
+        href: (e.getAttribute && e.getAttribute("href") || "").slice(0, 90),
+        text: (e.innerText || "").replace(/\s+/g, " ").trim().slice(0, 60),
+      })),
+    };
+  }
+  out.linkPatterns = byPattern;
+
+  // React fiber: the props often carry the job urn even when the DOM doesn't
+  const probeEl = document.querySelector("a[href*='currentJobId']")
+    || document.querySelector("[role='listitem']")
+    || document.querySelector("a[href*='/jobs/']");
+  out.reactFiber = (() => {
+    if (!probeEl) return "no candidate element";
+    const keys = Object.keys(probeEl).filter((k) =>
+      k.startsWith("__react") || k.startsWith("_react"));
+    if (!keys.length) return "no react keys on element";
+    const info = { keys };
+    try {
+      const fiber = probeEl[keys[0]];
+      const props = (fiber && (fiber.memoizedProps || fiber.pendingProps))
+        || (fiber && fiber.return && fiber.return.memoizedProps);
+      if (props) {
+        info.propKeys = Object.keys(props).slice(0, 25);
+        const j = JSON.stringify(props, (k, v) =>
+          (typeof v === "object" && v !== null && k && k.length > 40) ? "[obj]" : v);
+        const urn = j && j.match(/urn:li:[a-zA-Z]+:\d+/g);
+        info.urns = urn ? [...new Set(urn)].slice(0, 5) : [];
+      }
+    } catch (e) { info.error = String(e && e.message); }
+    return info;
+  })();
+
+  // The virtualized list's scroll container — needed to load all 25 cards
+  out.scrollContainers = [...document.querySelectorAll("div,ul,section,main")]
+    .filter((e) => e.scrollHeight > e.clientHeight + 200 && e.clientHeight > 200)
+    .slice(0, 5)
+    .map((e) => ({
+      tag: e.tagName.toLowerCase(),
+      cls: String(e.className || "").slice(0, 60),
+      scrollH: e.scrollHeight, clientH: e.clientHeight,
+      children: e.children.length,
+    }));
+
   // 5. Where is the description? Biggest text blocks on the page.
   const big = [];
   document.querySelectorAll("div,section,article,main").forEach((el) => {

@@ -83,8 +83,22 @@ async function askFrames(tabId, msg) {
   try {
     const frames = await chrome.webNavigation.getAllFrames({ tabId });
     if (frames && frames.length) {
-      frameIds = frames.map((f) => f.frameId);
-      for (const f of frames) frameUrl[f.frameId] = f.url;
+      /* Ask the TOP frame plus same-site frames only. A LinkedIn page carries ~15
+       * ad/tracking iframes (doubleclick, demdex, protechts, recaptcha); asking them
+       * produced pages of noise in the error output and let an empty ad frame be
+       * mistaken for "the job page has no cards". Content frames of the site being
+       * read are the only ones that can hold its content. */
+      const top = frames.find((f) => f.frameId === 0);
+      let host = "";
+      try { host = new URL(top ? top.url : "").hostname.split(".").slice(-2).join("."); }
+      catch (e) { host = ""; }
+      const keep = frames.filter((f) => {
+        if (f.frameId === 0) return true;
+        try { return host && new URL(f.url).hostname.endsWith(host); }
+        catch (e) { return false; }
+      });
+      frameIds = keep.map((f) => f.frameId);
+      for (const f of keep) frameUrl[f.frameId] = f.url;
     }
   } catch (e) { /* no webNavigation permission / restricted page → top frame only */ }
 

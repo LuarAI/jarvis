@@ -227,6 +227,50 @@
     "[data-view-name='job-search-job-card']",
   ];
 
+  /* Job ids WITHOUT touching the DOM's class names.
+   *
+   * The new /jobs/search-results/ React app has no data-* hooks and hashes every
+   * class (_4bbf76d5), so any selector written against it dies on LinkedIn's next
+   * deploy. But the URL carries the ids: currentJobId is the open one, and
+   * originToLandingJobPostings lists the results. Those are LinkedIn's own API
+   * contract, not styling, so they survive redesigns — this is the durable hook. */
+  function idsFromUrl() {
+    const ids = [];
+    try {
+      const u = new URL(location.href);
+      const cur = u.searchParams.get("currentJobId");
+      if (cur) ids.push(cur);
+      const landing = u.searchParams.get("originToLandingJobPostings");
+      if (landing) {
+        for (const part of landing.split(",")) {
+          const id = part.trim();
+          if (id && !ids.includes(id)) ids.push(id);
+        }
+      }
+    } catch (e) { /* malformed URL */ }
+    return ids;
+  }
+
+  /* Every job id the page mentions, from anywhere that isn't a class name:
+   * card anchors, currentJobId links, and any urn:li:jobPosting in the markup. */
+  function idsFromPage() {
+    const ids = new Set(idsFromUrl());
+    try {
+      for (const a of document.querySelectorAll("a[href]")) {
+        const href = a.getAttribute("href") || "";
+        let m = /\/jobs\/view\/(\d+)/.exec(href) || /[?&]currentJobId=(\d+)/.exec(href);
+        if (m) ids.add(m[1]);
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      const html = document.documentElement.innerHTML;
+      const re = /urn:li:(?:jobPosting|fsd_jobPosting):(\d+)/g;
+      let m, guard = 0;
+      while ((m = re.exec(html)) && guard++ < 200) ids.add(m[1]);
+    } catch (e) { /* huge page — skip */ }
+    return [...ids];
+  }
+
   function cardId(el) {
     const direct = el.getAttribute("data-occludable-job-id") || el.getAttribute("data-job-id");
     if (direct) return direct;
@@ -498,6 +542,64 @@
     }
   }
 
+  /* Read each job by driving the SPA's own URL parameter.
+   *
+   * pushState + popstate makes LinkedIn's router swap the detail pane exactly as a
+   * click would, without needing to find (or click) a card. Class-name churn can't
+   * break this, which is the point: three rounds of selector fixes died to hashed
+   * classes. The original URL is restored at the end. */
+  function readByUrl(ids, respond) {
+    const started = location.href;
+    const out = [];
+    const diag = ["url-driven mode (no DOM cards found)"];
+    let i = 0;
+
+    const finish = () => {
+      try { history.pushState({}, "", started); window.dispatchEvent(new PopStateEvent("popstate")); }
+      catch (e) { /* leave the URL as-is rather than fail the read */ }
+      respond({ ok: true, listings: out, diag, csVersion: JARVIS_CS_VERSION });
+    };
+
+    const next = () => {
+      if (i >= ids.length) { finish(); return; }
+      const id = ids[i++];
+      const before = detailText().slice(0, 400);
+      try {
+        const u = new URL(location.href);
+        u.searchParams.set("currentJobId", id);
+        history.pushState({}, "", u.toString());
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      } catch (e) {
+        diag.push(`#${id}: navigation failed ${e && e.message}`);
+      }
+      let waited = 0;
+      const poll = () => {
+        const text = detailText();
+        const open = openJobId();
+        const ready = text.length > 200
+          && (String(open) === String(id) || text.slice(0, 400) !== before);
+        if (ready || waited >= 8000) {
+          if (!ready) diag.push(`#${id}: no description after ${waited}ms (open=${open})`);
+          const head = text.split("\n").map((s) => s.trim()).filter(Boolean);
+          out.push({
+            title: head[0] || `Job ${id}`,
+            company: head[1] || "",
+            place: head[2] || "",
+            url: `https://www.linkedin.com/jobs/view/${id}/`,
+            flags: "",
+            description: text ? text.slice(0, 6000) : "(description didn't load)",
+          });
+          next();
+          return;
+        }
+        waited += 150;
+        setTimeout(poll, 150);
+      };
+      setTimeout(poll, 250);
+    };
+    next();
+  }
+
   // ── message handling ────────────────────────────────────────────────────
   const onMessage = (msg, _sender, respond) => {
     try {
@@ -593,9 +695,19 @@
          * no navigation away, nothing fetched that isn't already on this page. */
         const cards0 = linkedinCards();
         if (!cards0.length) {
-          respond({ ok: false, csVersion: JARVIS_CS_VERSION,
-                    error: "no job cards found on this page (URL: " + location.href.slice(0, 120)
-                           + ") — run ⚙ → Diagnose browser page" });
+          /* No DOM cards (the new React app hides them behind hashed classes) —
+           * fall back to driving the SPA by URL: set ?currentJobId=<id> and read the
+           * pane. The ids come from the URL and the page's own urns, so this path
+           * never depends on a class name. */
+          const ids = idsFromPage();
+          if (!ids.length) {
+            respond({ ok: false, csVersion: JARVIS_CS_VERSION,
+                      error: "no job ids found on this page (URL: "
+                             + location.href.slice(0, 120)
+                             + ") — run ⚙ → Diagnose browser page" });
+            return true;
+          }
+          readByUrl(ids.slice(0, (msg.params && msg.params.max) || 8), respond);
           return true;
         }
         // Hold IDs, never elements: the list is virtualized, so nodes are recycled.
