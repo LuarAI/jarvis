@@ -226,6 +226,7 @@ class ChatView:
         self.first_prompt = ""          # first user message (menu snippet + resume record name)
         self.draft = ""                 # entry text parked while another chat is active
         self.collecting = False         # 📄 page collector armed for this chat
+        self.collect_user_set = False   # the user chose explicitly → auto-arm won't override
         self.collected = {}             # key → {url,title,text,digest} awaiting the next send
         self.sent_digests = {}          # key → digest already sent (skip identical repeats)
         self.follow = True              # auto-scroll follows new content; goes False the moment
@@ -398,6 +399,9 @@ class Overlay:
                          "(☰ list → Close this chat), or raise MAX_CHATS in config.json.")
             return None
         v = self._new_chat_state()
+        # A new chat keeps collecting if the browser is connected — the toggle is a
+        # session-wide intent, not something to re-arm per conversation.
+        v.collecting = bool(self.bridge and self.bridge.connected)
         self._views.append(v)
         self._make_chat_widgets(v)
         self.switch_chat(v)
@@ -431,6 +435,7 @@ class Overlay:
         self._refresh_statusline()
         self._paint_gear()
         self._refresh_chats_chip()
+        self._refresh_collect_chip()   # the queue is per chat — show THIS chat's count
         self._sb_redraw()
         if v.last_zoom != self.zoom:       # zoom changed while this chat was in the back —
             self._rezoom_embeds()          # its fixed-size embeds (bubbles/chips) catch up
@@ -1230,6 +1235,7 @@ class Overlay:
         self.collect_chip.bind("<Button-1>", self._collect_menu)
         self.collect_chip.bind("<Enter>", self._collect_tip_show)
         self.collect_chip.bind("<Leave>", self._collect_tip_hide)
+        self.collect_chip.pack(side="left", padx=(self.px(10), 0), pady=pad)
         self.toggle_screen = tk.Label(st, bg=T["bg"], font=self.f_small, cursor="hand2")
         self.toggle_screen.pack(side="left", padx=(self.px(16), self.px(2)), pady=pad)
         self.toggle_screen.bind("<Button-1>", lambda e: self.toggle_auto())
@@ -1263,6 +1269,7 @@ class Overlay:
         self.grip.pack(side="right", padx=(0, self.px(8)), pady=pad)
         self.grip.bind("<ButtonPress-1>", self._resize_start)
         self.grip.bind("<B1-Motion>", self._resize_move)
+        self._refresh_collect_chip()     # 📄 is always visible — paint its initial state
 
     def _build_statusline(self):
         sl = tk.Frame(self.root, bg=T["bg"])
@@ -2028,7 +2035,16 @@ class Overlay:
     # it works on any site, not just job boards.
     def toggle_collect(self):
         v = self._cur
+        if not v.collecting and not (self.bridge and self.bridge.connected):
+            # Clicked with no extension: explain rather than arming something that
+            # can't capture anything.
+            self.add_sys("📄 Page collecting needs the Chrome extension. Load it from "
+                         "the extension folder (chrome://extensions → Developer mode → "
+                         "Load unpacked), then run host\\install.cmd with its ID — "
+                         "see extension/README.md. It arms itself once connected.")
+            return
         v.collecting = not v.collecting
+        v.collect_user_set = True       # a deliberate choice outranks the auto-arm
         if v.collecting:
             self.add_sys("📄 Collecting pages. Browse normally — every page you open "
                          "is remembered, and goes with your next message. Hover the "
@@ -2087,28 +2103,44 @@ class Overlay:
         self._refresh_collect_chip()
 
     def _refresh_collect_chip(self):
-        """The counter, left of the input row: '📄 7' while pages are queued. Hovering
-        lists them; clicking opens the drop-one menu."""
+        """The 📄 control — ALWAYS visible, so the feature is discoverable instead of
+        buried in the ⚙ menu, and so its state is readable at a glance:
+
+            📄        off        — click to start collecting
+            📄 …      on, empty  — browsing, nothing captured yet
+            📄 7      on, queued — 7 pages ride with your next message
+
+        Hovering lists the queue; clicking opens start/stop + drop."""
         chip = getattr(self, "collect_chip", None)
         if chip is None:
             return
         v = self._active
         n = len(v.collected)
-        show = v.collecting or n
         try:
-            if show and not chip.winfo_ismapped():
-                chip.pack(side="left", padx=(self.px(16), 0), pady=self.px(4))
-            elif not show and chip.winfo_ismapped():
-                chip.pack_forget()
+            if not chip.winfo_ismapped():
+                chip.pack(side="left", padx=(self.px(10), 0), pady=self.px(4))
         except Exception:
             pass
-        chip.configure(text=(f"📄 {n}" if n else "📄 …"),
-                       fg=(T["accent"] if n else T["muted"]))
+        if n:
+            chip.configure(text=f"📄 {n}", fg=T["accent"])
+        elif v.collecting:
+            chip.configure(text="📄 …", fg=T["accent"])
+        else:
+            chip.configure(text="📄", fg=T["faint"])
         titles = [d.get("title") or d.get("url", "") for d in v.collected.values()]
-        self._collect_tip_text = ("Pages queued for your next message:\n• "
-                                  + "\n• ".join(t[:60] for t in titles)
-                                  + "\n\n(click to remove one)") if titles else \
-            "Collecting — open a page and it lands here."
+        if titles:
+            self._collect_tip_text = ("Pages queued for your next message:\n• "
+                                      + "\n• ".join(t[:60] for t in titles)
+                                      + "\n\n(click to remove one)")
+        elif v.collecting:
+            self._collect_tip_text = ("Collecting — open a page in Chrome and it "
+                                      "lands here.\n(click to stop)")
+        elif not (self.bridge and self.bridge.connected):
+            self._collect_tip_text = ("Collect pages you browse.\nNeeds the Chrome "
+                                      "extension — click for setup.")
+        else:
+            self._collect_tip_text = ("Collect pages you browse, then ask about them "
+                                      "all at once.\n(click to start)")
 
     def _collect_tip_show(self, _e=None):
         """Hover the counter → the list of queued pages, so you can see (and then
@@ -5168,11 +5200,18 @@ class Overlay:
         elif kind == "fill_result":
             self._on_fill_result(payload[0], payload[1])
         elif kind == "browser_connected":
-            self.add_sys("🌐 Chrome extension connected. Arm a tab with Alt+Shift+J "
-                         "(or the Jarvis toolbar button), then ask me to read the page. "
-                         "New chats can use it right away; a chat that was already open "
-                         "needs Clear first.")
+            # Arm the collector automatically: connecting the bridge IS the user
+            # saying "read my browsing". They can still stop it from the 📄 chip.
+            for v in self._views:
+                if not v.collect_user_set:
+                    v.collecting = True
+            self._collect_tick()
+            self.add_sys("🌐 Chrome extension connected — and 📄 page collecting is on, "
+                         "so pages you open ride along with your next message (click 📄 "
+                         "to see, drop or stop). New chats can use the browser tools "
+                         "right away; a chat that was already open needs Clear first.")
             self._refresh_statusline()
+            self._refresh_collect_chip()
         elif kind == "browser_disconnected":
             self._pending_fill = None      # a proposal can't outlive its browser session
             self._refresh_statusline()
@@ -5312,7 +5351,7 @@ _CHAT_FIELDS = (
     "_turn_copy_added", "_session_id", "_discard_pending",
     "_compacting", "_compact_line", "_compact_anim_after", "_compact_t0",
     "_compact_frame", "_zoomables", "_sb_first", "_sb_last", "_sb_drag", "_sb_hover",
-    "follow", "collecting", "collected", "sent_digests",
+    "follow", "collecting", "collect_user_set", "collected", "sent_digests",
 )
 # Per-chat objects that are read but never assigned through Overlay:
 _CHAT_READONLY = ("chat", "scrollbar", "worker", "ui_q")

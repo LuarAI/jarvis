@@ -40,6 +40,7 @@ class TestCollectGating:
 
     def test_toggle_announces_and_arms(self, overlay, monkeypatch):
         monkeypatch.setattr(overlay, "_collect_tick", lambda: None)
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
         overlay.toggle_collect()
         assert overlay._cur.collecting is True
         assert "Collecting pages" in chat_text(overlay)
@@ -49,6 +50,59 @@ class TestCollectGating:
         assert not any("Collect pages" in l for l, _ in overlay._gear_items())
         monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
         assert any("Collect pages" in l for l, _ in overlay._gear_items())
+
+
+class TestAlwaysVisibleChip:
+    """The 📄 control is permanent — a feature you can only find in a menu is a
+    feature most people never find."""
+
+    def test_chip_visible_even_when_idle(self, overlay):
+        overlay._cur.collecting = False
+        overlay._cur.collected.clear()
+        overlay._refresh_collect_chip()
+        assert overlay.collect_chip.winfo_manager()      # packed, not hidden
+        assert overlay.collect_chip.cget("text") == "📄"
+
+    def test_chip_states_read_at_a_glance(self, overlay, monkeypatch):
+        monkeypatch.setattr(overlay, "_collect_tick", lambda: None)
+        overlay._refresh_collect_chip()
+        assert overlay.collect_chip.cget("fg") == co.T["faint"]      # off
+        overlay._cur.collecting = True
+        overlay._refresh_collect_chip()
+        assert overlay.collect_chip.cget("text") == "📄 …"           # on, empty
+        overlay._on_collected(overlay._cur, _snap())
+        assert overlay.collect_chip.cget("text") == "📄 1"           # on, queued
+        assert overlay.collect_chip.cget("fg") == co.T["accent"]
+
+    def test_click_without_extension_explains_setup(self, overlay, monkeypatch):
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: False))
+        overlay.toggle_collect()
+        assert overlay._cur.collecting is False          # nothing armed pointlessly
+        assert "Chrome extension" in chat_text(overlay)
+
+    def test_bridge_connecting_arms_it(self, overlay, monkeypatch):
+        monkeypatch.setattr(overlay, "_collect_tick", lambda: None)
+        overlay._cur.collecting = False
+        overlay._cur.collect_user_set = False
+        overlay._handle("browser_connected", None)
+        assert overlay._cur.collecting is True
+        assert "collecting is on" in chat_text(overlay)
+
+    def test_explicit_off_survives_reconnect(self, overlay, monkeypatch):
+        monkeypatch.setattr(overlay, "_collect_tick", lambda: None)
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
+        overlay._cur.collecting = True
+        overlay.toggle_collect()                          # user turns it OFF deliberately
+        assert overlay._cur.collecting is False
+        overlay._handle("browser_connected", None)        # extension reconnects
+        assert overlay._cur.collecting is False           # their choice is respected
+
+    def test_hover_text_explains_when_idle(self, overlay, monkeypatch):
+        monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
+        overlay._cur.collecting = False
+        overlay._cur.collected.clear()
+        overlay._refresh_collect_chip()
+        assert "click to start" in overlay._collect_tip_text
 
 
 class TestCollecting:

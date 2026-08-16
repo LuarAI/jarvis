@@ -21,6 +21,16 @@ Chrome 136+ blocks external automation (CDP/`--remote-debugging`) of your real, 
 
 ## Using it
 
+### Reading many pages: the 📄 collector
+
+Turn on **📄** in Jarvis (it arms itself once this extension connects). Now browse normally — every page you open is captured and travels with your next message. Click through six job postings, then ask *"compare these and tell me which to apply to."*
+
+Hover the 📄 counter to see what's queued; click it to drop anything you don't want sent, or to stop collecting. The queue clears each time you send, and a page you already sent is never re-sent unless its content changed.
+
+This is deliberately **not** a scraper: it only ever captures pages *you* opened, which is why it keeps working when sites redesign their listings.
+
+### One page at a time
+
 1. Open the job posting / form in Chrome.
 2. In Jarvis, just ask — it reads **the tab you're looking at**:
    - *"What does this job ask for?"* → it reads the page
