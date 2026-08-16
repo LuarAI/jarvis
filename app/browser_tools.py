@@ -47,11 +47,17 @@ MAX_TEXT = 20_000
 
 def _fmt_fields(fields):
     """Compact, model-friendly rendering of the field schema (JSON, but trimmed of
-    empty keys so a 60-field form doesn't eat the context window)."""
+    empty keys so a 60-field form doesn't eat the context window). Fields whose label
+    couldn't be resolved are marked so the model asks instead of inventing an answer
+    for a question it cannot actually read."""
     out = []
     for f in fields or []:
         d = {k: v for k, v in f.items() if v not in ("", None, False, [])}
         d.pop("currentValue", None) if not d.get("currentValue") else None
+        if d.get("labelSource") in (None, "none") or not d.get("label"):
+            d["UNLABELLED"] = "ask the user what this field is — do not guess"
+        elif d.get("labelSource") == "nearby-text":
+            d["labelUncertain"] = "label inferred from nearby text; confirm if it matters"
         out.append(d)
     return json.dumps(out, ensure_ascii=False, indent=1)
 
@@ -107,7 +113,11 @@ def build_tools(bridge, propose_fill):
           "the user sees every proposed field and value in Jarvis and approves or edits "
           "them before a single character is typed. Use the exact 'ref' ids from "
           "browser_read_page. Never propose values for a field you had to guess about — "
-          "ask the user instead. Forms are never submitted.",
+          "ask the user instead. In particular, if a field's labelSource is \"none\" or "
+          "\"nearby-text\", you do NOT reliably know what it asks: say so and ask, "
+          "rather than inferring from position. If a fill comes back saying the form "
+          "changed, re-read the page before trying again — never retry the same refs. "
+          "Forms are never submitted.",
           {"type": "object",
            "properties": {
                "fills": {

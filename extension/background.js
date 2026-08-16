@@ -75,11 +75,20 @@ function schedule() {
   backoff = Math.min(backoff * 2, 30000);
 }
 
-// The popup talks to us over runtime messaging (it cannot hold the native port).
+/* The popup talks to us over runtime messaging (it cannot hold the native port).
+ * Returning `true` ONLY for popup messages matters: this listener also sees the
+ * content script's messages, and claiming the channel for those would leave them
+ * waiting on a reply we never send. */
 chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
-  if (!msg || !msg.popup) return;
+  if (!msg || !msg.popup) return false;
   (async () => {
-    if (msg.popup === "setEnabled") await setEnabled(msg.value);
+    if (msg.popup === "setEnabled") {
+      await setEnabled(msg.value);
+    } else {
+      // Status query: read the persisted value, since the service worker may have
+      // restarted since the toggle was set and the in-memory flag would be default.
+      await loadEnabled();
+    }
     let tab = "";
     try {
       const t = await targetTab();
@@ -87,7 +96,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     } catch (e) { /* no usable tab */ }
     respond({ enabled, connected: !!port, tab: String(tab).slice(0, 80) });
   })();
-  return true;                        // async respond
+  return true;                        // async respond (popup messages only)
 });
 
 function send(obj) {

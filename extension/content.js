@@ -30,6 +30,7 @@
   const JARVIS_CS_VERSION = 5;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
+  const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
   let refSeq = 0;
 
   // ── visibility: the honeypot battery ────────────────────────────────────
@@ -66,33 +67,104 @@
   }
 
   // ── label resolution (Chromium/Bitwarden precedence) ────────────────────
-  function labelFor(el) {
-    const txt = (s) => (s || "").replace(/\s+/g, " ").trim();
-    if (el.id) {
-      const l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      if (l && txt(l.innerText)) return txt(l.innerText);
+  /* Strings that look like a label but aren't — accepting one is worse than
+   * finding nothing, because it silently reads as a real question. LinkedIn's
+   * radio groups put a visually-hidden "Required" span inside the <legend>. */
+  const LABEL_NOISE = /^(required|optional|\*|select an option|choose|please select|yes|no)$/i;
+
+  /* Read an element's text INCLUDING visually-hidden parts.
+   *
+   * innerText skips anything hidden by CSS, and LinkedIn duplicates each question
+   * as an aria-hidden span plus a .visually-hidden span for screen readers. Using
+   * innerText therefore returned "" for those labels and the resolver fell back to
+   * the element id — the "raw element ids" the user saw. textContent sees both
+   * copies, so de-duplicate the doubled text afterwards. */
+  function labelText(node) {
+    if (!node) return "";
+    let s = (node.textContent || "").replace(/\s+/g, " ").trim();
+    if (!s) return "";
+    // Strip the trailing Required/* FIRST: LinkedIn appends it inside the same
+    // container, and leaving it on defeats the duplicate check below.
+    s = s.replace(/\s*(required|optional|\*)\s*$/i, "").trim();
+    // "Question?Question?" → "Question?" — LinkedIn renders each question twice,
+    // once aria-hidden and once visually-hidden, so textContent sees both.
+    const half = s.length / 2;
+    if (s.length % 2 === 0 && s.slice(0, half).trim() === s.slice(half).trim()) {
+      s = s.slice(0, half).trim();
+    } else {
+      // tolerate a separator between the copies ("Q? Q?")
+      const m = s.match(/^(.{8,}?)[\s.,;:—-]*\1$/);
+      if (m) s = m[1].trim();
     }
-    const wrap = el.closest("label");
-    if (wrap && txt(wrap.innerText)) return txt(wrap.innerText);
+    return s;
+  }
+
+  function labelFor(el) {
+    const ok = (s) => (s && !LABEL_NOISE.test(s) && s !== el.id && s !== el.name) ? s : "";
+    let hit;
+    if (el.id) {
+      let l = null;
+      try { l = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); }
+      catch (e) { /* exotic id — fall through */ }
+      if (!l) {                       // CSS.escape can still miss urn:li:…(a,b,c) ids
+        try {
+          l = Array.from(document.querySelectorAll("label[for]"))
+            .find((n) => n.getAttribute("for") === el.id) || null;
+        } catch (e) { /* none */ }
+      }
+      if ((hit = ok(labelText(l)))) return hit;
+    }
+    if ((hit = ok(labelText(el.closest("label"))))) return hit;
     const lb = el.getAttribute("aria-labelledby");
     if (lb) {
       const parts = lb.split(/\s+/).map((id) => document.getElementById(id))
-        .filter(Boolean).map((n) => txt(n.innerText));
-      if (parts.join(" ").trim()) return txt(parts.join(" "));
+        .filter(Boolean).map(labelText).filter((t) => t && !LABEL_NOISE.test(t));
+      if ((hit = ok(parts.join(" ").trim()))) return hit;
     }
-    const al = el.getAttribute("aria-label");
-    if (txt(al)) return txt(al);
-    if (txt(el.placeholder)) return txt(el.placeholder);
-    if (txt(el.title)) return txt(el.title);
-    // nearest preceding text node/element (label-less layouts)
+    if ((hit = ok((el.getAttribute("aria-label") || "").trim()))) return hit;
+    // the group's own caption: <fieldset><legend> (radio groups), or the question
+    // block LinkedIn/Greenhouse wrap each field in
+    const grp = el.closest("fieldset");
+    if (grp && (hit = ok(labelText(grp.querySelector("legend"))))) return hit;
+    const box = el.closest("[data-test-form-element], .fb-dash-form-element, "
+                           + ".artdeco-text-input--container, .form-group, fieldset");
+    if (box) {
+      const cap = box.querySelector("label, legend, .fb-dash-form-element__label");
+      if ((hit = ok(labelText(cap)))) return hit;
+    }
+    if ((hit = ok((el.placeholder || "").trim()))) return hit;
+    if ((hit = ok((el.title || "").trim()))) return hit;
     let p = el.previousElementSibling;
     for (let i = 0; i < 3 && p; i++, p = p.previousElementSibling) {
-      const t = txt(p.innerText);
-      if (t && t.length <= 120) return t;
+      const t = labelText(p);
+      if (t && t.length <= 200 && (hit = ok(t))) return hit;
     }
     const auto = el.getAttribute("data-automation-id");   // Workday convention
-    if (auto) return txt(auto.replace(/[-_]/g, " "));
-    return txt(el.name || el.id);
+    if (auto) return auto.replace(/[-_]/g, " ").trim();
+    return "";                        // NOT the id: an unlabelled field must say so
+  }
+
+  /* Where the label came from. Returned in the schema so the model can tell a real
+   * question from a fallback and ask instead of inventing an answer — Jarvis could
+   * previously only detect failure when the label happened to equal the id. */
+  function labelSourceFor(el, label) {
+    if (!label) return "none";
+    const t = (n) => labelText(n);
+    if (el.id) {
+      let l = null;
+      try {
+        l = Array.from(document.querySelectorAll("label[for]"))
+          .find((n) => n.getAttribute("for") === el.id) || null;
+      } catch (e) { /* none */ }
+      if (l && t(l) === label) return "label-for";
+    }
+    if (t(el.closest("label")) === label) return "wrapping-label";
+    if ((el.getAttribute("aria-labelledby") || "").trim()) return "aria-labelledby";
+    if ((el.getAttribute("aria-label") || "").trim() === label) return "aria-label";
+    const grp = el.closest("fieldset");
+    if (grp && t(grp.querySelector("legend")) === label) return "legend";
+    if ((el.placeholder || "").trim() === label) return "placeholder";
+    return "nearby-text";
   }
 
   function sectionFor(el) {
@@ -183,9 +255,22 @@
       const ref = "f" + ++refSeq;
       FIELDS.set(ref, el);
       const kind = kindOf(el);
+      const lbl = labelFor(el);
+      /* Identity that does NOT depend on document order.
+       *
+       * Refs were ordinal, so if the page re-rendered between listing the fields and
+       * the user approving the fill (LinkedIn's count went 39 → 34 → 39), f7 pointed
+       * at a DIFFERENT element and a value was written into the wrong input — a
+       * healthcare answer landed in a "Your Role / Title" box on a live application.
+       * The fill now re-verifies this fingerprint before typing and refuses on
+       * mismatch, so drift becomes a clean error instead of silent corruption. */
+      const fp = [el.tagName, el.type || "", el.name || "", el.id || "",
+                  lbl.slice(0, 60)].join("|");
+      FIELD_FP.set(ref, fp);
       const f = {
         ref, kind,
-        label: labelFor(el).slice(0, 160),
+        label: lbl.slice(0, 160),
+        labelSource: labelSourceFor(el, lbl),
         section: sectionFor(el),
         required: !!(el.required || el.getAttribute("aria-required") === "true"),
         autocomplete: el.getAttribute("autocomplete") || "",
@@ -582,6 +667,18 @@
     if (!el || !el.isConnected) return { ref, ok: false, error: "field is gone (page changed?)" };
     if (isForbidden(el) || !isVisible(el)) return { ref, ok: false, error: "field is not fillable" };
     if (isSubmitter(el)) return { ref, ok: false, error: "refusing to touch a submit control" };
+    // Refuse if this ref no longer points at the field it was listed as. A re-render
+    // between listing and approval used to silently retarget the write.
+    const want = FIELD_FP.get(bare);
+    if (want) {
+      const now = [el.tagName, el.type || "", el.name || "", el.id || "",
+                   labelFor(el).slice(0, 60)].join("|");
+      if (now !== want) {
+        return { ref, ok: false,
+                 error: "the form changed since it was read — re-read it before "
+                        + "filling (refusing to write into a different field)" };
+      }
+    }
     try {
       highlight(el, "pending");
       el.scrollIntoView({ block: "center", behavior: "smooth" });

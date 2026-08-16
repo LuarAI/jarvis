@@ -2218,7 +2218,7 @@ class Overlay:
         if len(text) < 200:
             return                              # a blank/loading page isn't worth keeping
         key = res.get("key") or res.get("url") or ""
-        digest = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+        digest = self._page_digest(text)
         prev = view.collected.get(key)
         if prev and prev["digest"] == digest:
             return                              # identical — already have it
@@ -2229,6 +2229,24 @@ class Overlay:
         if len(view.collected) > MAX_COLLECTED:
             view.collected.pop(next(iter(view.collected)))
         self._refresh_collect_chip()
+
+    @staticmethod
+    def _page_digest(text):
+        """Fingerprint a page's MEANINGFUL content.
+
+        A live page drifts on every visit — progress meters ("67%"), relative times
+        ("2 hours ago"), applicant counts, view counts. Hashing the raw text made a
+        revisit look like a change, so a page the user had already sent came back and
+        was sent again. Normalising the churn away keeps "re-send if it changed"
+        honest: a real edit still differs, a revisit doesn't."""
+        s = (text or "").lower()
+        s = re.sub(r"\b\d+\s*%", "", s)                       # progress meters
+        s = re.sub(r"\b\d+\s*(second|minute|hour|day|week|month|year)s?\s*ago\b", "", s)
+        s = re.sub(r"\b\d[\d,.]*\s*(applicant|view|click|impression|follower)s?\b", "", s)
+        s = re.sub(r"\b(just now|today|yesterday)\b", "", s)
+        s = re.sub(r"\d{1,2}:\d{2}(:\d{2})?\s*(am|pm)?", "", s)   # clocks
+        s = re.sub(r"\s+", " ", s).strip()
+        return hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()
 
     def _refresh_collect_chip(self):
         """The 📄 control — ALWAYS visible, so the feature is discoverable instead of
@@ -5503,7 +5521,18 @@ class Overlay:
             self._refresh_collect_chip()
         elif kind == "browser_disconnected":
             self._pending_fill = None      # a proposal can't outlive its browser session
+            # Disconnected means disconnected: drop queued page content too. Keeping
+            # it would send pages from a browser link the user just cut — which is
+            # exactly what they were switching off.
+            dropped = 0
+            for v in self._views:
+                dropped += len(v.collected)
+                v.collected.clear()
+                v.collecting = False
+            if dropped:
+                self.add_sys(f"🌐 Browser link off — discarded {dropped} queued page(s).")
             self._refresh_statusline()
+            self._refresh_collect_chip()
         elif kind == "voice_text":
             self._on_voice_text(payload)
         elif kind == "voice_err":
