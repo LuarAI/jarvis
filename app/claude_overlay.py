@@ -4569,11 +4569,18 @@ class Overlay:
             self.add_err(f"Layout probe failed: {(res or {}).get('error', 'no answer')}")
             return
         lines = [f"🔎 {res.get('url', '?')}",
-                 f"job cards seen: {res.get('cardCount', 0)}"]
+                 f"content-script v{res.get('csVersion', '?')} · "
+                 f"cards {res.get('cardCount', 0)} · open job {res.get('openJobId') or '—'} · "
+                 f"JSON-LD {res.get('jsonLd', 0)} chars"]
         fc = res.get("firstCard")
         if fc:
-            lines.append(f"first card: {fc.get('title', '?')} "
+            lines.append(f"first card: {fc.get('title', '?')} #{fc.get('id', '?')} "
                          f"(link={fc.get('hasLink')}, in-DOM={fc.get('connected')})")
+        lines.append("card selectors:")
+        for h in res.get("cardSelectors") or []:
+            n = h.get("count", 0)
+            lines.append(f"  {'✓' if n > 0 else '·'} {h.get('sel')[:58]}  →  {n}")
+        lines.append("description selectors:")
         for h in res.get("selectors") or []:
             mark = "✓" if h.get("found") else "·"
             lines.append(f"  {mark} {h.get('sel')}  →  {h.get('chars', 0)} chars")

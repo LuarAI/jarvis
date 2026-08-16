@@ -96,11 +96,19 @@ async function askFrames(tabId, msg) {
    * looked permanently unreachable ("the connection to that tab is stale"). */
   async function askFrame(frameId) {
     const short = (u) => String(u || "").slice(0, 60);
+    let stale = false;
     try {
       const r = await chrome.tabs.sendMessage(tabId, msg, { frameId });
       if (r && r.ok) return { frameId, r };
-      if (r) { diag.push({ frameId, url: short(frameUrl[frameId]),
-                           error: "replied not-ok: " + (r.error || "?") }); return null; }
+      // "unknown action" means an OLD content script is still resident (the page was
+      // loaded before the extension was updated). Re-inject to replace it, instead of
+      // accepting the refusal — otherwise the stale script persists until a reload.
+      stale = !!(r && /unknown action/i.test(String(r.error || "")));
+      if (r && !stale) {
+        diag.push({ frameId, url: short(frameUrl[frameId]),
+                    error: "replied not-ok: " + (r.error || "?") });
+        return null;
+      }
     } catch (e) { /* no content script here yet — inject and retry below */ }
     try {
       await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] },

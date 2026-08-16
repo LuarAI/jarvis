@@ -25,6 +25,9 @@
   if (window.__jarvisTeardown) {
     try { window.__jarvisTeardown(); } catch (e) { /* previous listener already dead */ }
   }
+  // Bumped whenever this file changes: every reply carries it, so "the page is running
+  // an old script" is visible in the answer instead of being inferred from a weird error.
+  const JARVIS_CS_VERSION = 5;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   let refSeq = 0;
@@ -207,26 +210,86 @@
    * extractor and by read_listings. Both the <li> and the .job-card-container
    * inside it match the selector, so dedupe by job id or every posting appears
    * twice. */
+  /* Card selectors, in priority order.
+   *
+   * LinkedIn is mid-migration from the legacy Ember/artdeco DOM (hashed BEM classes)
+   * to React with data-view-name attributes and virtualized [data-component-type=
+   * LazyColumn] lists — which is why /jobs/search-results/ looked empty while
+   * /jobs/collections/ worked. Match on STABLE attributes (data-occludable-job-id,
+   * data-job-id, data-view-name) and use :has() so hashed class names never matter.
+   * Shape follows damianmgarcia/Hide-n-Seek, which carries both DOM generations. */
+  const CARD_SELECTORS = [
+    "li[data-occludable-job-id]",
+    "li:has(.job-card-container, .job-search-card, [data-job-id])",
+    ".job-card-container[data-job-id]",
+    "[data-view-name='job-card']",
+    "div:has(> [data-view-name='job-search-job-card'])",
+    "[data-view-name='job-search-job-card']",
+  ];
+
+  function cardId(el) {
+    const direct = el.getAttribute("data-occludable-job-id") || el.getAttribute("data-job-id");
+    if (direct) return direct;
+    const inner = el.querySelector && el.querySelector("[data-job-id], [data-occludable-job-id]");
+    if (inner) {
+      const v = inner.getAttribute("data-job-id") || inner.getAttribute("data-occludable-job-id");
+      if (v) return v;
+    }
+    // React layout: the id lives in the card's own /jobs/view/<id> link
+    const a = el.matches && el.matches("a[href*='/jobs/view/']")
+      ? el : (el.querySelector && el.querySelector("a[href*='/jobs/view/']"));
+    const m = a && /\/jobs\/view\/(\d+)/.exec(a.getAttribute("href") || "");
+    return m ? m[1] : null;
+  }
+
   function linkedinCards() {
     if (!/linkedin\.com/.test(location.hostname)) return [];
-    const t = (n) => (n && (n.innerText || "")).replace(/\s+/g, " ").trim();
+    // NB the parens: `(n && n.innerText) || ""` — the old form evaluated to null for a
+    // missing element and then threw on .replace, which killed the whole scan on
+    // layouts that lack the legacy classes.
+    const t = (n) => ((n && n.innerText) || "").replace(/\s+/g, " ").trim();
     const seen = new Set();
     const out = [];
-    for (const el of document.querySelectorAll("li[data-occludable-job-id], .job-card-container")) {
-      const id = el.getAttribute("data-occludable-job-id") || el.getAttribute("data-job-id");
+    const nodes = [];
+    for (const sel of CARD_SELECTORS) {
+      try {
+        for (const n of document.querySelectorAll(sel)) nodes.push(n);
+      } catch (e) { /* :has() unsupported on an old engine — skip that selector */ }
+    }
+    for (const el of nodes) {
+      const id = cardId(el);
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      const link = el.querySelector("a.job-card-container__link, a.job-card-list__title--link");
-      const title = (link && (link.getAttribute("aria-label") || t(link))) || "";
+      // Title/link: legacy classes first, then ANY /jobs/view/ anchor (React layout),
+      // then the card's own aria-label. Hashed classes are never required.
+      const link = el.querySelector("a.job-card-container__link, a.job-card-list__title--link")
+        || el.querySelector("a[href*='/jobs/view/']")
+        || (el.matches && el.matches("a[href*='/jobs/view/']") ? el : null);
+      let title = (link && (link.getAttribute("aria-label") || t(link))) || "";
+      if (!title) title = t(el.querySelector("[class*='job-card-list__title'], strong")) || "";
+      if (!title) title = (el.getAttribute("aria-label") || "").trim();
       if (!title) continue;
+      title = title.replace(/\s+with verification$/i, "").trim();
       const href = link && link.getAttribute("href");
+      // Company/location: the legacy lockup classes, else the card's remaining lines.
+      let company = t(el.querySelector(".artdeco-entity-lockup__subtitle"));
+      let place = t(el.querySelector(
+        ".job-card-container__metadata-wrapper, .artdeco-entity-lockup__caption"));
+      if (!company || !place) {
+        const lines = (el.innerText || "").split("\n")
+          .map((s) => s.trim())
+          .filter((s) => s && s !== title && !/^(easy apply|promoted|viewed|saved)$/i.test(s));
+        if (!company && lines[0]) company = lines[0];
+        if (!place && lines[1]) place = lines[1];
+      }
       out.push({
-        el, link, id, title,
-        company: t(el.querySelector(".artdeco-entity-lockup__subtitle")),
-        place: t(el.querySelector(".job-card-container__metadata-wrapper, .artdeco-entity-lockup__caption")),
-        foot: t(el.querySelector(".job-card-container__footer-wrapper")),
-        url: href ? "https://www.linkedin.com" + href.split("?")[0] : "",
-        active: !!(el.querySelector('[aria-current="page"]') || el.matches('[aria-current="page"]')
+        el, link, id, title, company, place,
+        foot: t(el.querySelector(".job-card-container__footer-wrapper"))
+          || ((el.innerText || "").match(/Easy Apply|Promoted|Viewed|Actively reviewing/gi) || []).join(" · "),
+        url: href ? ("https://www.linkedin.com" + href.split("?")[0]).replace(
+                      /^https:\/\/www\.linkedin\.comhttps?:/, "https:")
+                  : `https://www.linkedin.com/jobs/view/${id}/`,
+        active: !!(el.querySelector('[aria-current="page"]') || (el.matches && el.matches('[aria-current="page"]'))
                    || el.querySelector(".jobs-search-results-list__list-item--active")),
       });
       if (out.length >= 40) break;
@@ -238,20 +301,71 @@
    * some), so try the known names, then fall back to STRUCTURE: the biggest text
    * block in the detail column that isn't the results list. Relying on one class
    * name is what left every listing "(description didn't load)". */
+  const DETAIL_SELECTORS = [
+    "#job-details",                              // an ID, the most durable of the set
+    ".jobs-description-content__text",
+    ".jobs-box__html-content",
+    ".jobs-description__content",
+    "[class*='jobs-description']",
+    "[data-view-name='job-details']",            // React layout
+    ".jobs-search__job-details",
+    ".jobs-details", ".job-view-layout",
+    ".scaffold-layout__detail",                  // structural: the whole detail column
+  ];
+
   function detailPane() {
-    const SELS = [".jobs-search__job-details", ".jobs-details", ".job-view-layout",
-                  "#job-details", ".jobs-search__job-details--wrapper",
-                  ".jobs-details__main-content", ".jobs-box__html-content",
-                  "[class*='jobs-search__job-details']"];
-    for (const sel of SELS) {
+    for (const sel of DETAIL_SELECTORS) {
       let n = null;
       try { n = document.querySelector(sel); } catch (e) { continue; }
       if (n && (n.innerText || "").trim().length > 200) return n;
     }
-    // structural fallback: the detail column of the two-pane layout
-    const col = document.querySelector(".scaffold-layout__detail, main .scaffold-layout__detail");
-    if (col && (col.innerText || "").trim().length > 200) return col;
     return null;
+  }
+
+  /* Last resort: LinkedIn embeds a schema.org JobPosting in the page. When every
+   * selector misses (a layout we've never seen), this still yields the description. */
+  function jsonLdPosting() {
+    for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+      let data = null;
+      try { data = JSON.parse(s.textContent || "{}"); } catch (e) { continue; }
+      const items = Array.isArray(data) ? data : [data, ...(data["@graph"] || [])];
+      for (const it of items) {
+        if (it && it["@type"] === "JobPosting" && it.description) {
+          const tmp = document.createElement("div");
+          tmp.innerHTML = String(it.description);
+          const text = (tmp.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
+          if (text.length > 100) {
+            return [it.title, it.hiringOrganization && it.hiringOrganization.name, text]
+              .filter(Boolean).join("\n");
+          }
+        }
+      }
+    }
+    return "";
+  }
+
+  function detailText() {
+    const d = detailPane();
+    const text = d ? (d.innerText || "").replace(/\n{3,}/g, "\n\n").trim() : "";
+    return text || jsonLdPosting();
+  }
+
+  /* Which job is the detail pane currently showing? The URL's currentJobId is the
+   * SPA's own source of truth, so a click is "done" when it matches the card we
+   * clicked — far more reliable than a fixed delay, which is how the reader ended up
+   * capturing the PREVIOUS job's description. */
+  function openJobId() {
+    try {
+      const u = new URL(location.href);
+      const q = u.searchParams.get("currentJobId");
+      if (q) return q;
+    } catch (e) { /* fall through */ }
+    const m = /\/jobs\/view\/(\d+)/.exec(location.pathname);
+    if (m) return m[1];
+    const a = document.querySelector(
+      ".jobs-search__job-details a[href*='/jobs/view/'], [data-view-name='job-details'] a[href*='/jobs/view/']");
+    const m2 = a && /\/jobs\/view\/(\d+)/.exec(a.getAttribute("href") || "");
+    return m2 ? m2[1] : null;
   }
 
   function detailSignature() {
@@ -261,7 +375,10 @@
 
   function linkedinJobs() {
     if (!/linkedin\.com/.test(location.hostname)) return null;
-    const t = (n) => (n && (n.innerText || "")).replace(/\s+/g, " ").trim();
+    // NB the parens: `(n && n.innerText) || ""` — the old form evaluated to null for a
+    // missing element and then threw on .replace, which killed the whole scan on
+    // layouts that lack the legacy classes.
+    const t = (n) => ((n && n.innerText) || "").replace(/\s+/g, " ").trim();
     const out = [];
 
     const detail = detailPane();
@@ -409,19 +526,24 @@
         /* Diagnostic: what does this page actually look like to us? Reports which
          * detail-pane selector matches and how many cards we see, so a layout change
          * is a five-second check instead of a guessing session. */
-        const SELS = [".jobs-search__job-details", ".jobs-details", ".job-view-layout",
-                      "#job-details", ".jobs-search__job-details--wrapper",
-                      ".jobs-details__main-content", "[class*='jobs-search__job-details']",
-                      ".scaffold-layout__detail", ".jobs-box__html-content"];
-        const hits = SELS.map((sel) => {
+        const hits = DETAIL_SELECTORS.map((sel) => {
           let n = null;
           try { n = document.querySelector(sel); } catch (e) { /* bad selector */ }
           return { sel, found: !!n, chars: n ? (n.innerText || "").trim().length : 0 };
         });
+        const cardSel = CARD_SELECTORS.map((sel) => {
+          let n = 0;
+          try { n = document.querySelectorAll(sel).length; } catch (e) { n = -1; }
+          return { sel, count: n };
+        });
         const cards = linkedinCards();
-        respond({ ok: true, url: location.href, selectors: hits,
+        respond({ ok: true, url: location.href, selectors: hits, cardSelectors: cardSel,
+                  csVersion: JARVIS_CS_VERSION,
+                  openJobId: openJobId(),
+                  jsonLd: jsonLdPosting().length,
                   cardCount: cards.length,
-                  firstCard: cards[0] ? { title: cards[0].title, hasLink: !!cards[0].link,
+                  firstCard: cards[0] ? { title: cards[0].title, id: cards[0].id,
+                                          hasLink: !!cards[0].link,
                                           connected: !!(cards[0].el && cards[0].el.isConnected) }
                                       : null });
       } else if (msg.action === "read_listings") {
@@ -431,36 +553,66 @@
          * the tab they are already looking at, at human pace — this is the user
          * clicking through their own search results, not a crawler: no pagination,
          * no navigation away, nothing fetched that isn't already on this page. */
-        const ids = linkedinCards().map((c) => c.id);
-        if (!ids.length) { respond({ ok: false, error: "no job list on this page" }); return true; }
+        const cards0 = linkedinCards();
+        if (!cards0.length) {
+          respond({ ok: false, csVersion: JARVIS_CS_VERSION,
+                    error: "no job cards found on this page (URL: " + location.href.slice(0, 120)
+                           + ") — run ⚙ → Diagnose browser page" });
+          return true;
+        }
+        // Hold IDs, never elements: the list is virtualized, so nodes are recycled.
+        const ids = cards0.map((c) => c.id);
+        const meta = {};
+        for (const c of cards0) meta[c.id] = c;
         const want = Math.min(ids.length, (msg.params && msg.params.max) || 8);
         const out = [];
         const diag = [];
         let i = 0;
 
         const next = () => {
-          if (i >= want) { respond({ ok: true, listings: out, diag }); return; }
+          if (i >= want) { respond({ ok: true, listings: out, diag,
+                                     csVersion: JARVIS_CS_VERSION }); return; }
           const id = ids[i++];
-          // Re-find the card by ID each time: LinkedIn VIRTUALIZES the list, so the
-          // element captured at scan time is detached by the time we reach it — the
-          // click then went nowhere and every description came back empty.
-          const card = linkedinCards().find((c) => c.id === id);
-          if (!card) { diag.push(`#${id}: card gone from DOM`); next(); return; }
-          const before = detailSignature();
+          // Re-find by ID each time — an element captured earlier may be detached.
+          let card = linkedinCards().find((c) => c.id === id);
+          if (!card) {
+            // Not rendered right now: scroll the list to materialize it.
+            const anchor = linkedinCards()[0];
+            if (anchor && anchor.el && anchor.el.scrollIntoView) {
+              try { anchor.el.scrollIntoView({ block: "end" }); } catch (e) { /* ignore */ }
+            }
+            card = linkedinCards().find((c) => c.id === id);
+          }
+          if (!card) {
+            const m = meta[id] || {};
+            diag.push(`#${id}: card not in DOM`);
+            out.push({ title: m.title, company: m.company, place: m.place, url: m.url,
+                       flags: m.foot, description: "(description didn't load)" });
+            next();
+            return;
+          }
+          const wasOpen = openJobId();
+          const before = detailText().slice(0, 400);
           try {
-            card.el.scrollIntoView({ block: "center" });   // virtualized lists need this
+            card.el.scrollIntoView({ block: "center" });
             (card.link || card.el).click();
           } catch (e) {
             diag.push(`#${id}: click failed ${e && e.message}`);
           }
-          // Poll for the pane to actually CHANGE, rather than assuming a fixed delay.
+          /* Done when the SPA says THIS job is open (currentJobId) and the pane holds
+           * text — falling back to "the text changed" when no id is exposed. Without
+           * the id check a fast machine captures the PREVIOUS job's description. */
           let waited = 0;
           const poll = () => {
-            const sig = detailSignature();
-            if ((sig && sig !== before && sig.length > 300) || waited >= 4000) {
-              const d = detailPane();
-              const text = d ? (d.innerText || "").replace(/\n{3,}/g, "\n\n").trim() : "";
+            const now = openJobId();
+            const text = detailText();
+            const idMatches = now && String(now) === String(id);
+            const changed = text && text.slice(0, 400) !== before;
+            const ready = text.length > 200 && (idMatches || (!now && changed) ||
+                                                (now === wasOpen && changed));
+            if (ready || waited >= 8000) {
               if (!text) diag.push(`#${id}: pane empty after ${waited}ms`);
+              else if (!ready) diag.push(`#${id}: timed out (open=${now})`);
               out.push({
                 title: card.title, company: card.company, place: card.place,
                 url: card.url, flags: card.foot,
@@ -469,10 +621,10 @@
               next();
               return;
             }
-            waited += 200;
-            setTimeout(poll, 200);
+            waited += 150;
+            setTimeout(poll, 150);
           };
-          setTimeout(poll, 250);
+          setTimeout(poll, 200);
         };
         next();
         return true;                   // async respond
@@ -498,10 +650,11 @@
         step();
         return true;                   // async respond
       } else {
-        respond({ ok: false, error: "unknown action" });
+        respond({ ok: false, error: "unknown action", csVersion: JARVIS_CS_VERSION });
       }
     } catch (e) {
-      respond({ ok: false, error: String(e && e.message || e) });
+      respond({ ok: false, error: String(e && e.message || e),
+                csVersion: JARVIS_CS_VERSION });
     }
     return true;
   };
