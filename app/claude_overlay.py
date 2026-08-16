@@ -1663,6 +1663,8 @@ class Overlay:
             ("      Add context folder…", self.add_context_dir),
             ("      Microphone…", self.pick_microphone),
         ]
+        if getattr(self, "bridge", None) and self.bridge.connected:
+            items.append(("      Diagnose browser page", self.probe_browser_layout))
         if CONTEXT_DIRS:
             items.append((f"      Forget context folders ({len(CONTEXT_DIRS)})",
                           self.forget_context_dirs))
@@ -4557,6 +4559,25 @@ class Overlay:
                 chip.pack_forget()
         except Exception:
             pass
+
+    def probe_browser_layout(self):
+        """⚙ → Diagnose browser page: ask the page what WE see — which detail-pane
+        selector matches and how many cards. A LinkedIn/ATS layout change otherwise
+        shows up as a vague "couldn't read it", and costs a round of guessing."""
+        res = self.bridge.request("probe_layout", timeout=10.0)
+        if not isinstance(res, dict) or res.get("error") or not res.get("ok"):
+            self.add_err(f"Layout probe failed: {(res or {}).get('error', 'no answer')}")
+            return
+        lines = [f"🔎 {res.get('url', '?')}",
+                 f"job cards seen: {res.get('cardCount', 0)}"]
+        fc = res.get("firstCard")
+        if fc:
+            lines.append(f"first card: {fc.get('title', '?')} "
+                         f"(link={fc.get('hasLink')}, in-DOM={fc.get('connected')})")
+        for h in res.get("selectors") or []:
+            mark = "✓" if h.get("found") else "·"
+            lines.append(f"  {mark} {h.get('sel')}  →  {h.get('chars', 0)} chars")
+        self.add_sys("\n".join(lines))
 
     def _web_chip_click(self, _e=None):
         res = self.bridge.request("armed_status", timeout=3.0) if self.bridge else {}

@@ -234,13 +234,37 @@
     return out;
   }
 
+  /* The open posting's pane. LinkedIn renames these classes regularly (and hashes
+   * some), so try the known names, then fall back to STRUCTURE: the biggest text
+   * block in the detail column that isn't the results list. Relying on one class
+   * name is what left every listing "(description didn't load)". */
+  function detailPane() {
+    const SELS = [".jobs-search__job-details", ".jobs-details", ".job-view-layout",
+                  "#job-details", ".jobs-search__job-details--wrapper",
+                  ".jobs-details__main-content", ".jobs-box__html-content",
+                  "[class*='jobs-search__job-details']"];
+    for (const sel of SELS) {
+      let n = null;
+      try { n = document.querySelector(sel); } catch (e) { continue; }
+      if (n && (n.innerText || "").trim().length > 200) return n;
+    }
+    // structural fallback: the detail column of the two-pane layout
+    const col = document.querySelector(".scaffold-layout__detail, main .scaffold-layout__detail");
+    if (col && (col.innerText || "").trim().length > 200) return col;
+    return null;
+  }
+
+  function detailSignature() {
+    const d = detailPane();
+    return d ? (d.innerText || "").trim().slice(0, 400) : "";
+  }
+
   function linkedinJobs() {
     if (!/linkedin\.com/.test(location.hostname)) return null;
     const t = (n) => (n && (n.innerText || "")).replace(/\s+/g, " ").trim();
     const out = [];
 
-    const detail = document.querySelector(
-      ".jobs-search__job-details, .jobs-details, .job-view-layout, #job-details");
+    const detail = detailPane();
     if (detail && t(detail).length > 200) {
       out.push("=== OPEN POSTING ===", (detail.innerText || "").replace(/\n{3,}/g, "\n\n").trim());
     }
@@ -381,6 +405,25 @@
           excluded_counts: excluded,
           warnings: warnings.length ? warnings : undefined,
         });
+      } else if (msg.action === "probe_layout") {
+        /* Diagnostic: what does this page actually look like to us? Reports which
+         * detail-pane selector matches and how many cards we see, so a layout change
+         * is a five-second check instead of a guessing session. */
+        const SELS = [".jobs-search__job-details", ".jobs-details", ".job-view-layout",
+                      "#job-details", ".jobs-search__job-details--wrapper",
+                      ".jobs-details__main-content", "[class*='jobs-search__job-details']",
+                      ".scaffold-layout__detail", ".jobs-box__html-content"];
+        const hits = SELS.map((sel) => {
+          let n = null;
+          try { n = document.querySelector(sel); } catch (e) { /* bad selector */ }
+          return { sel, found: !!n, chars: n ? (n.innerText || "").trim().length : 0 };
+        });
+        const cards = linkedinCards();
+        respond({ ok: true, url: location.href, selectors: hits,
+                  cardCount: cards.length,
+                  firstCard: cards[0] ? { title: cards[0].title, hasLink: !!cards[0].link,
+                                          connected: !!(cards[0].el && cards[0].el.isConnected) }
+                                      : null });
       } else if (msg.action === "read_listings") {
         /* Open each job card in turn and collect its full description.
          *
@@ -388,27 +431,48 @@
          * the tab they are already looking at, at human pace — this is the user
          * clicking through their own search results, not a crawler: no pagination,
          * no navigation away, nothing fetched that isn't already on this page. */
-        const cards = linkedinCards();
-        if (!cards.length) { respond({ ok: false, error: "no job list on this page" }); return true; }
-        const want = Math.min(cards.length, (msg.params && msg.params.max) || 8);
+        const ids = linkedinCards().map((c) => c.id);
+        if (!ids.length) { respond({ ok: false, error: "no job list on this page" }); return true; }
+        const want = Math.min(ids.length, (msg.params && msg.params.max) || 8);
         const out = [];
+        const diag = [];
         let i = 0;
+
         const next = () => {
-          if (i >= want) { respond({ ok: true, listings: out }); return; }
-          const c = cards[i++];
-          try { (c.link || c.el).click(); } catch (e) { /* keep going */ }
-          // wait for the detail pane to swap in, then snapshot it
-          setTimeout(() => {
-            const d = document.querySelector(
-              ".jobs-search__job-details, .jobs-details, .job-view-layout, #job-details");
-            out.push({
-              title: c.title, company: c.company, place: c.place, url: c.url,
-              flags: c.foot,
-              description: d ? (d.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 6000)
-                             : "(description didn't load)",
-            });
-            next();
-          }, 1200);
+          if (i >= want) { respond({ ok: true, listings: out, diag }); return; }
+          const id = ids[i++];
+          // Re-find the card by ID each time: LinkedIn VIRTUALIZES the list, so the
+          // element captured at scan time is detached by the time we reach it — the
+          // click then went nowhere and every description came back empty.
+          const card = linkedinCards().find((c) => c.id === id);
+          if (!card) { diag.push(`#${id}: card gone from DOM`); next(); return; }
+          const before = detailSignature();
+          try {
+            card.el.scrollIntoView({ block: "center" });   // virtualized lists need this
+            (card.link || card.el).click();
+          } catch (e) {
+            diag.push(`#${id}: click failed ${e && e.message}`);
+          }
+          // Poll for the pane to actually CHANGE, rather than assuming a fixed delay.
+          let waited = 0;
+          const poll = () => {
+            const sig = detailSignature();
+            if ((sig && sig !== before && sig.length > 300) || waited >= 4000) {
+              const d = detailPane();
+              const text = d ? (d.innerText || "").replace(/\n{3,}/g, "\n\n").trim() : "";
+              if (!text) diag.push(`#${id}: pane empty after ${waited}ms`);
+              out.push({
+                title: card.title, company: card.company, place: card.place,
+                url: card.url, flags: card.foot,
+                description: text ? text.slice(0, 6000) : "(description didn't load)",
+              });
+              next();
+              return;
+            }
+            waited += 200;
+            setTimeout(poll, 200);
+          };
+          setTimeout(poll, 250);
         };
         next();
         return true;                   // async respond

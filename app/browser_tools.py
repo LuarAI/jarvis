@@ -118,10 +118,24 @@ def build_tools(bridge, propose_fill):
             return {"content": [{"type": "text",
                                  "text": f"Couldn't read the listings: {res.get('error') or 'unknown error'}"}]}
         rows = res.get("listings") or []
+        diag = res.get("diag") or []
         if not rows:
+            note = ("  Details: " + "; ".join(diag[:5])) if diag else ""
             return {"content": [{"type": "text",
-                                 "text": "No job list found on that page — is it a search-results page?"}]}
-        parts = [f"{len(rows)} listing(s), full descriptions follow.", UNTRUSTED_NOTE]
+                                 "text": "No listings could be opened on that page." + note
+                                         + "  Tell the user plainly that you could NOT read "
+                                           "the individual descriptions, and that ⚙ → "
+                                           "'Diagnose browser page' will show what the reader "
+                                           "sees. Do not present title-only guesses as if you "
+                                           "had read the postings."}]}
+        got = sum(1 for r in rows if "didn't load" not in (r.get("description") or ""))
+        parts = [f"{len(rows)} listing(s) opened; {got} returned a real description."]
+        if got < len(rows):
+            parts.append("IMPORTANT: the ones marked (description didn't load) were NOT "
+                         "read — say so rather than inferring from the title.")
+        if diag:
+            parts.append("Reader notes: " + "; ".join(diag[:5]))
+        parts.append(UNTRUSTED_NOTE)
         for i, r in enumerate(rows, 1):
             parts.append(
                 f"\n--- {i}. {r.get('title', '?')} — {r.get('company', '?')} "
