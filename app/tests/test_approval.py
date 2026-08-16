@@ -39,16 +39,9 @@ class TestNeedsApproval:
         assert _worker()._needs_approval(tool) is False
 
     @pytest.mark.parametrize("tool", ["Bash", "Write", "Edit", "PowerShell",
-                                      "mcp__jarvis_browser__browser_fill_form",
-                                      "mcp__jarvis_browser__browser_read_listings"])
+                                      "mcp__jarvis_browser__browser_fill_form"])
     def test_actions_ask(self, tool):
         assert _worker()._needs_approval(tool) is True
-
-    def test_read_listings_asks_because_it_clicks(self):
-        # it navigates the user's own tab — visible side effects, so it is an action
-        w = _worker()
-        assert w._is_browser_read("mcp__jarvis_browser__browser_read_listings") is False
-        assert w._needs_approval("mcp__jarvis_browser__browser_read_listings") is True
 
 
 # ── the permission callback ──────────────────────────────────────────────────
@@ -134,12 +127,6 @@ class TestAllowToolFlow:
         assert type(res).__name__ == "PermissionResultDeny"
         assert w.ui.empty()
 
-    def test_read_listings_denial_explains_the_approval_path(self):
-        w = _worker("plan")
-        res = _run(w._allow_tool("mcp__jarvis_browser__browser_read_listings", {}, None))
-        assert type(res).__name__ == "PermissionResultDeny"
-        # it must tell the user how to get it, not just refuse
-        assert "Read-only" in res.message and "⚙" in res.message
 
 
 class TestUnlockedModePairsWithCards:

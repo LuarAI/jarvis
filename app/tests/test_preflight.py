@@ -26,8 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Modules that are safe to import before the crash reporter is installed: they ship with
 # Python, so they cannot be the thing a broken install is missing.
 _STDLIB_OK = {
-    "asyncio", "base64", "ctypes", "ctypes.wintypes", "json", "os", "re", "sys",
-    "threading", "time", "queue", "pathlib", "traceback", "tempfile",
+    "asyncio", "base64", "ctypes", "ctypes.wintypes", "hashlib", "json", "os", "re",
+    "sys", "threading", "time", "queue", "pathlib", "traceback", "tempfile",
 }
 
 

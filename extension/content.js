@@ -207,7 +207,7 @@
    * badges. So extract it structurally: the open posting in full, plus a compact
    * index of the visible cards (title · company · location · flags). */
   /* The visible job cards, deduped and parsed once — shared by the page-text
-   * extractor and by read_listings. Both the <li> and the .job-card-container
+   * extractor and by the page index. Both the <li> and the .job-card-container
    * inside it match the selector, so dedupe by job id or every posting appears
    * twice. */
   /* Card selectors, in priority order.
@@ -624,6 +624,23 @@
           excluded_counts: excluded,
           warnings: warnings.length ? warnings : undefined,
         });
+      } else if (msg.action === "collect_snapshot") {
+        /* One page snapshot for the collector: what the user is looking at RIGHT
+         * NOW. No clicking, no enumeration, no walking a result set — the user
+         * browses, we remember. That sidesteps every fragile thing about scraping
+         * a listing UI (hashed classes, virtualization, hidden ids) because the
+         * content is already on screen, and it keeps the human in front of the
+         * filter. Works on any site, not just job boards. */
+        const key = openJobId() || location.href.split("#")[0];
+        const text = (linkedinJobs() ? detailText() : "") || pageText(6000);
+        respond({
+          ok: true,
+          key: String(key),
+          url: location.href.slice(0, 300),
+          title: (document.title || "").slice(0, 160),
+          text: (text || "").slice(0, 6000),
+          csVersion: JARVIS_CS_VERSION,
+        });
       } else if (msg.action === "probe_layout") {
         /* Diagnostic: what does this page actually look like to us? Reports which
          * detail-pane selector matches and how many cards we see, so a layout change
@@ -686,98 +703,6 @@
                                           hasLink: !!cards[0].link,
                                           connected: !!(cards[0].el && cards[0].el.isConnected) }
                                       : null });
-      } else if (msg.action === "read_listings") {
-        /* Open each job card in turn and collect its full description.
-         *
-         * Only ever runs on an explicit user request ("read all of these"), inside
-         * the tab they are already looking at, at human pace — this is the user
-         * clicking through their own search results, not a crawler: no pagination,
-         * no navigation away, nothing fetched that isn't already on this page. */
-        const cards0 = linkedinCards();
-        if (!cards0.length) {
-          /* No DOM cards (the new React app hides them behind hashed classes) —
-           * fall back to driving the SPA by URL: set ?currentJobId=<id> and read the
-           * pane. The ids come from the URL and the page's own urns, so this path
-           * never depends on a class name. */
-          const ids = idsFromPage();
-          if (!ids.length) {
-            respond({ ok: false, csVersion: JARVIS_CS_VERSION,
-                      error: "no job ids found on this page (URL: "
-                             + location.href.slice(0, 120)
-                             + ") — run ⚙ → Diagnose browser page" });
-            return true;
-          }
-          readByUrl(ids.slice(0, (msg.params && msg.params.max) || 8), respond);
-          return true;
-        }
-        // Hold IDs, never elements: the list is virtualized, so nodes are recycled.
-        const ids = cards0.map((c) => c.id);
-        const meta = {};
-        for (const c of cards0) meta[c.id] = c;
-        const want = Math.min(ids.length, (msg.params && msg.params.max) || 8);
-        const out = [];
-        const diag = [];
-        let i = 0;
-
-        const next = () => {
-          if (i >= want) { respond({ ok: true, listings: out, diag,
-                                     csVersion: JARVIS_CS_VERSION }); return; }
-          const id = ids[i++];
-          // Re-find by ID each time — an element captured earlier may be detached.
-          let card = linkedinCards().find((c) => c.id === id);
-          if (!card) {
-            // Not rendered right now: scroll the list to materialize it.
-            const anchor = linkedinCards()[0];
-            if (anchor && anchor.el && anchor.el.scrollIntoView) {
-              try { anchor.el.scrollIntoView({ block: "end" }); } catch (e) { /* ignore */ }
-            }
-            card = linkedinCards().find((c) => c.id === id);
-          }
-          if (!card) {
-            const m = meta[id] || {};
-            diag.push(`#${id}: card not in DOM`);
-            out.push({ title: m.title, company: m.company, place: m.place, url: m.url,
-                       flags: m.foot, description: "(description didn't load)" });
-            next();
-            return;
-          }
-          const wasOpen = openJobId();
-          const before = detailText().slice(0, 400);
-          try {
-            card.el.scrollIntoView({ block: "center" });
-            (card.link || card.el).click();
-          } catch (e) {
-            diag.push(`#${id}: click failed ${e && e.message}`);
-          }
-          /* Done when the SPA says THIS job is open (currentJobId) and the pane holds
-           * text — falling back to "the text changed" when no id is exposed. Without
-           * the id check a fast machine captures the PREVIOUS job's description. */
-          let waited = 0;
-          const poll = () => {
-            const now = openJobId();
-            const text = detailText();
-            const idMatches = now && String(now) === String(id);
-            const changed = text && text.slice(0, 400) !== before;
-            const ready = text.length > 200 && (idMatches || (!now && changed) ||
-                                                (now === wasOpen && changed));
-            if (ready || waited >= 8000) {
-              if (!text) diag.push(`#${id}: pane empty after ${waited}ms`);
-              else if (!ready) diag.push(`#${id}: timed out (open=${now})`);
-              out.push({
-                title: card.title, company: card.company, place: card.place,
-                url: card.url, flags: card.foot,
-                description: text ? text.slice(0, 6000) : "(description didn't load)",
-              });
-              next();
-              return;
-            }
-            waited += 150;
-            setTimeout(poll, 150);
-          };
-          setTimeout(poll, 200);
-        };
-        next();
-        return true;                   // async respond
       } else if (msg.action === "list_fields") {
         const scan = scanFields();
         respond({ ok: true, url: location.href, ats: atsOf(), isTop: window.top === window,

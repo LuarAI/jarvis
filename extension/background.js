@@ -159,17 +159,13 @@ async function askFrames(tabId, msg) {
     return { results };
   }
 
-  if (msg.action === "read_listings") {
-    // Only one frame can own the job list; take whichever answered with listings.
-    const hit = live.find(({ r }) => (r.listings || []).length);
-    if (hit) return { listings: hit.r.listings, diag: hit.r.diag };
-    // None had any: say which frames we asked, so "no cards" can't be mistaken for
-    // "the page has no jobs" when we simply asked the wrong frame.
-    return { listings: [],
-             diag: live.map(({ frameId, r }) =>
-               `frame ${frameId} (${(frameUrl[frameId] || "?").slice(0, 60)}): `
-               + `${r.cardCount || 0} cards`).concat(
-                 (live.find(({ r }) => r.diag) || { r: {} }).r.diag || []) };
+  if (msg.action === "collect_snapshot") {
+    // whichever frame has the most text is the content (not an ad iframe)
+    let best = null;
+    for (const { r } of live) {
+      if (!best || (r.text || "").length > (best.text || "").length) best = r;
+    }
+    return best || { text: "" };
   }
 
   if (msg.action === "probe_layout") {
@@ -255,9 +251,20 @@ async function handle(msg) {
     }
     const tabId = target.id;
     const tab = target;
+    if (msg.action === "collect_snapshot") {
+      // Snapshot whatever tab the user is looking at — deliberately NOT the pinned
+      // one: the collector follows the user's browsing.
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!active || UNSCRIPTABLE.test(active.url || "")) {
+        reply({ ok: true, skip: true }); return;
+      }
+      const r = await askFrames(active.id, msg);
+      reply(r.error ? { ok: false, error: r.error }
+                    : Object.assign({ ok: true }, r));
+      return;
+    }
     if (msg.action === "read_page" || msg.action === "list_fields"
-        || msg.action === "fill_fields" || msg.action === "read_listings"
-        || msg.action === "probe_layout") {
+        || msg.action === "fill_fields" || msg.action === "probe_layout") {
       const res = await askFrames(tabId, msg);
       if (res.error) { reply({ ok: false, error: res.error }); return; }
       reply(Object.assign({ ok: true, tabUrl: tab.url, tabTitle: tab.title }, res));

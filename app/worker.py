@@ -269,8 +269,6 @@ class ClaudeWorker(threading.Thread):
     # The browser tools that only READ (the SDK namespaces in-process MCP tools as
     # mcp__<server>__<tool>, so match on the suffix). Kept as a suffix test rather
     # than exact names so an SDK naming change can't silently re-block reading.
-    # NOTE browser_read_listings is deliberately NOT here: it CLICKS through the
-    # user's results, which changes what's on their screen — an action, so it asks.
     _BROWSER_READ_SUFFIXES = ("browser_read_page", "browser_list_fields")
 
     @classmethod
@@ -358,14 +356,6 @@ class ClaudeWorker(threading.Thread):
                             "Tell the user what you'd put in each field as plain text, "
                             "and that they can turn Read-only off in the ⚙ menu to get "
                             "the approve-and-fill card.")
-            if str(tool_name or "").endswith("browser_read_listings"):
-                return PermissionResultDeny(
-                    message="Read-only mode is on, and opening each listing clicks "
-                            "through the user's tab. Work from the result-card summary "
-                            "in browser_read_page, SAY that you only have the open "
-                            "posting's full text, and tell them to turn Read-only off "
-                            "in the ⚙ menu (they'll get an Approve card, not a blank "
-                            "cheque) if they want all the descriptions.")
             return PermissionResultDeny(
                 message="The user has locked this overlay READ-ONLY (plan mode). Don't "
                         "retry the call or try to exit plan mode — present your findings "

@@ -135,6 +135,9 @@ def _clean_overlay(ov):
         ov._views[0].unread = False
         ov._views[0].first_prompt = ""
         ov._views[0].draft = ""
+        ov._views[0].collecting = False    # the 📄 collector must not leak between tests
+        ov._views[0].collected.clear()
+        ov._views[0].sent_digests.clear()
         ov._refresh_chats_chip()
         co._save_state(model=None)      # a persisted model pick must not leak between tests
     except Exception:
