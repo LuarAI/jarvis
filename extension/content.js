@@ -39,6 +39,27 @@
   function isVisible(el) {
     try {
       if (el.type === "hidden" || el.disabled || el.readOnly) return false;
+      const t = (el.type || "").toLowerCase();
+      /* Radios and checkboxes are routinely SIZE-ZERO by design: the control is
+       * hidden and its <label> is styled to look like the button you click (this is
+       * how LinkedIn Easy Apply renders every Yes/No). Judging them by their own box
+       * marked them as honeypots and dropped them from the schema entirely — which
+       * is why Jarvis could see the text questions but not the Yes/No ones. Judge
+       * them by whether their LABEL is visible instead. */
+      if (t === "radio" || t === "checkbox") {
+        if (el.closest('[aria-hidden="true"]')) return false;
+        const lab = (el.id && labelElementFor(el.id)) || el.closest("label");
+        for (const n of [el, lab]) {
+          if (!n) continue;
+          try {
+            const r = n.getBoundingClientRect();
+            if (r.width >= 2 && r.height >= 2 && r.right > -500 && r.bottom > -500) {
+              return true;
+            }
+          } catch (e) { /* try the next candidate */ }
+        }
+        return false;
+      }
       if (typeof el.checkVisibility === "function" &&
           !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
       const r = el.getBoundingClientRect();
@@ -50,6 +71,21 @@
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  /* <label for="…"> lookup that tolerates ids CSS.escape can't express (LinkedIn's
+   * urn:li:fsd_formElement:…(4452974708,35282365962,multipleChoice)). */
+  function labelElementFor(id) {
+    try {
+      const l = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+      if (l) return l;
+    } catch (e) { /* fall through */ }
+    try {
+      return Array.from(document.querySelectorAll("label[for]"))
+        .find((n) => n.getAttribute("for") === id) || null;
+    } catch (e) {
+      return null;
     }
   }
 
@@ -240,11 +276,42 @@
     return "text";
   }
 
+  /* The visible text of one radio/checkbox option: its own label, not the group's
+   * question. LinkedIn puts it in <label for>; other forms wrap the input. */
+  function optionText(el) {
+    const lab = (el.id && labelElementFor(el.id)) || el.closest("label");
+    const t = labelText(lab);
+    if (t) return t;
+    return (el.value || "").trim();
+  }
+
+  /* The question a radio GROUP asks — one level up from the individual options.
+   * fieldset/legend first (LinkedIn, Greenhouse), then an explicit radiogroup, then
+   * the shared form-element container. */
+  function groupLabel(el) {
+    const grp = el.closest("fieldset, [role='radiogroup'], [data-test-form-element], "
+                           + ".fb-dash-form-element, .form-group");
+    if (!grp) return "";
+    const legend = grp.querySelector("legend, .fb-dash-form-element__label");
+    let t = labelText(legend);
+    if (t && !LABEL_NOISE.test(t)) return t;
+    t = (grp.getAttribute("aria-label") || "").trim();
+    if (t && !LABEL_NOISE.test(t)) return t;
+    const lb = grp.getAttribute("aria-labelledby");
+    if (lb) {
+      const parts = lb.split(/\s+/).map((id) => document.getElementById(id))
+        .filter(Boolean).map(labelText).filter((s) => s && !LABEL_NOISE.test(s));
+      if (parts.length) return parts.join(" ");
+    }
+    return "";
+  }
+
   function scanFields() {
     FIELDS.clear();
     refSeq = 0;
     const fields = [];
     const excluded = { credentials: 0, hidden_or_honeypot: 0 };
+    const radioGroups = new Map();     // group key → {members, field}
     for (const el of deepQueryAll(document)) {
       // One awkward element must never cost the whole page: skip it and carry on.
       // (A single throw here used to fail the entire frame, which is how a
@@ -252,6 +319,34 @@
       try {
       if (isForbidden(el)) { excluded.credentials++; continue; }
       if (!isVisible(el)) { excluded.hidden_or_honeypot++; continue; }
+      /* A radio group is N inputs sharing a name but ONE logical question.
+       * Emitting them separately would hand the model two refs ("Yes", "No") with
+       * no signal that they're exclusive — so collapse them into a single field
+       * shaped exactly like a <select>, options and all, and remember every member
+       * so the fill can click the right one. */
+      if ((el.type || "").toLowerCase() === "radio") {
+        const key = (el.form ? "f" : "") + (el.name || groupLabel(el) || "radio");
+        let g = radioGroups.get(key);
+        if (!g) {
+          const ref = "f" + ++refSeq;
+          const question = groupLabel(el) || labelFor(el) || "";
+          g = {
+            members: [],
+            field: { ref, kind: "radio", label: question.slice(0, 160),
+                     labelSource: question ? "legend" : "none",
+                     nameAttr: el.name || "", options: [], currentValue: "" },
+          };
+          radioGroups.set(key, g);
+          fields.push(g.field);
+          FIELDS.set(ref, g.members);           // the fill resolves this to a member
+          FIELD_FP.set(ref, "radio|" + key + "|" + question.slice(0, 60));
+        }
+        g.members.push(el);
+        const text = optionText(el);
+        g.field.options.push({ value: el.value || text, text });
+        if (el.checked) g.field.currentValue = text || el.value || "";
+        continue;
+      }
       const ref = "f" + ++refSeq;
       FIELDS.set(ref, el);
       const kind = kindOf(el);
@@ -663,14 +758,48 @@
     // frame only knows its own bare ids. A ref for another frame simply isn't here,
     // and that frame handles it in parallel.
     const bare = String(ref).includes(":") ? String(ref).split(":").pop() : String(ref);
-    const el = FIELDS.get(bare);
+    let el = FIELDS.get(bare);
+    /* A radio ref resolves to the GROUP (an array of inputs); pick the member whose
+     * option text or value matches, then click it. Direct .checked assignment is
+     * ignored by React, so a real click is the only thing that sticks. */
+    if (Array.isArray(el)) {
+      const live = el.filter((n) => n && n.isConnected);
+      if (!live.length) return { ref, ok: false, error: "the options are gone (page changed?)" };
+      const want = String(value).trim().toLowerCase();
+      const norm = (s) => String(s || "").trim().toLowerCase();
+      const pick = live.find((n) => norm(optionText(n)) === want)
+        || live.find((n) => norm(n.value) === want)
+        || live.find((n) => norm(optionText(n)).startsWith(want))
+        || live.find((n) => want.startsWith(norm(optionText(n))) && norm(optionText(n)).length > 1);
+      if (!pick) {
+        return { ref, ok: false,
+                 error: `no option "${value}" (choices: `
+                        + live.map(optionText).filter(Boolean).join(", ") + ")" };
+      }
+      try {
+        (labelElementFor(pick.id) || pick).scrollIntoView({ block: "center" });
+        pick.click();                       // fires input+change the way a user does
+        if (!pick.checked) {                // some forms need the label clicked
+          const lab = labelElementFor(pick.id);
+          if (lab) lab.click();
+        }
+      } catch (e) {
+        return { ref, ok: false, error: String(e && e.message || e) };
+      }
+      // verify: a write that silently didn't take is worse than a reported failure
+      if (!pick.checked) {
+        return { ref, ok: false, error: "the option didn't select (the form ignored it)" };
+      }
+      highlight(pick, "filled");
+      return { ref, ok: true, value: optionText(pick) || pick.value || "" };
+    }
     if (!el || !el.isConnected) return { ref, ok: false, error: "field is gone (page changed?)" };
     if (isForbidden(el) || !isVisible(el)) return { ref, ok: false, error: "field is not fillable" };
     if (isSubmitter(el)) return { ref, ok: false, error: "refusing to touch a submit control" };
     // Refuse if this ref no longer points at the field it was listed as. A re-render
     // between listing and approval used to silently retarget the write.
     const want = FIELD_FP.get(bare);
-    if (want) {
+    if (want && !String(want).startsWith("radio|")) {
       const now = [el.tagName, el.type || "", el.name || "", el.id || "",
                    labelFor(el).slice(0, 60)].join("|");
       if (now !== want) {
@@ -695,6 +824,13 @@
       if (kind === "checkbox" || kind === "radio") {
         const want = value === true || /^(true|yes|on|checked|1)$/i.test(String(value));
         if (!!el.checked !== want) el.click();      // click fires everything natively
+        if (!!el.checked !== want) {                // hidden input? click its label
+          const lab = labelElementFor(el.id);
+          if (lab) lab.click();
+        }
+        if (!!el.checked !== want) {                // verify: a silent no-op is worse
+          return { ref, ok: false, error: "the box didn't change (the form ignored it)" };
+        }
       } else if (kind === "select") {
         const opts = Array.from(el.options);
         const want = String(value).toLowerCase();
