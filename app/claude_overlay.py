@@ -281,6 +281,7 @@ class Overlay:
             on_event=lambda kind, payload: self._app_q.put((kind, payload)))
         self.bridge.start()
         self._pending_fill = None       # the proposal awaiting the user's approval
+        self._approval_cards: list = []  # live approval cards, retired on Stop/Clear
         v = self._new_chat_state()      # chat 1: state + worker now, widgets in _build_chat
         self._views.append(v)
         self._active = self._cur = v
@@ -1077,9 +1078,13 @@ class Overlay:
         m = self.f_body.measure("0") * 5
         chat.tag_configure("uh", foreground=T["muted"], font=self.f_chip,
                                 spacing1=self.px(12), lmargin1=m, lmargin2=m, justify="right")
+        # Your messages: real selectable text styled as a card. Indented from the left
+        # (lmargin) so it reads as "yours" against Claude's full-width answers, with
+        # generous padding so the tinted background looks like a bubble.
         chat.tag_configure("user", background=T["user_card"], foreground=T["text"],
-                                lmargin1=m, lmargin2=m, rmargin=self.px(2),
-                                spacing1=self.px(6), spacing3=self.px(8))
+                                lmargin1=m, lmargin2=m, rmargin=self.px(14),
+                                spacing1=self.px(8), spacing3=self.px(8),
+                                spacing2=self.px(2))
         chat.tag_configure("ah", foreground=T["accent"], font=self.f_chip,
                                 spacing1=self.px(16), spacing3=self.px(2))
         chat.tag_configure("a", foreground=T["text"], spacing2=self.px(2))
@@ -1848,6 +1853,152 @@ class Overlay:
                     "(text and form fields) instead of asking them to paste anything.]")
         except Exception:
             return ""
+
+    # ── action approval (Claude Code-style: see what it will do, then decide) ──
+    def _approval_text(self, tool, inp):
+        """A human sentence for what this tool call would DO, plus the detail that
+        matters (the command, the path, the diff-ish preview). Never truncated so
+        aggressively that you approve something you couldn't read."""
+        d = inp if isinstance(inp, dict) else {}
+        bare = str(tool).split("__")[-1]
+        if bare in ("Bash", "PowerShell"):
+            cmd = str(d.get("command", "")).strip()
+            return ("Run a command", cmd[:600] or "(no command)")
+        if bare in ("Write",):
+            body = str(d.get("content", ""))
+            return (f"Create / overwrite {d.get('file_path', '?')}",
+                    f"{len(body)} characters\n\n" + body[:400] + ("…" if len(body) > 400 else ""))
+        if bare in ("Edit", "MultiEdit", "NotebookEdit"):
+            old = str(d.get("old_string", ""))[:200]
+            new = str(d.get("new_string", ""))[:200]
+            return (f"Edit {d.get('file_path', '?')}",
+                    (f"− {old}\n\n+ {new}" if old or new else "(structured edit)"))
+        if bare == "browser_fill_form":
+            n = len(d.get("fills") or [])
+            return (f"Fill {n} form field(s) in the browser", "You'll review each value next.")
+        if bare == "browser_read_listings":
+            n = int(d.get("max") or 8)
+            return (f"Open up to {n} job listings in your browser tab",
+                    "Clicks each result in turn to read its full description — "
+                    "you'll see the page change.")
+        if bare.startswith("browser_"):
+            return (f"Browser: {bare[8:].replace('_', ' ')}", "")
+        return (f"Use {bare}", self._summ(d, 300))
+
+    def _retire_approvals(self):
+        """Reject (and grey out) every open approval card. Called when the turn is
+        ending anyway — Stop, Clear — so the awaiting callback is always released
+        and no card is left looking clickable."""
+        cards, self._approval_cards = self._approval_cards, []
+        for c in cards:
+            try:
+                c._retire()
+            except Exception:
+                pass
+
+    def _render_approval(self, req):
+        """The approval card: what the action is, its detail, and the buttons. The
+        turn is paused inside the SDK's permission callback until one is clicked."""
+        title, detail = self._approval_text(req.get("tool"), req.get("input"))
+        self._md_finalize()
+        self._ensure_header()
+        self.add_sys(f"⏸ Needs your approval — {title}")
+        if detail:
+            self._ins(detail.rstrip() + "\n", "tool")
+        at_bottom = self.follow
+        self.chat.insert("end", "\n")
+        self.chat.window_create("end", window=self._approval_btns(req),
+                                padx=self.px(16), pady=self.px(2))
+        self.chat.insert("end", "\n")
+        if at_bottom:
+            self.chat.see("end")
+        self._prune_chat()
+        self._set_status("waiting for your approval…")
+
+    def _approval_btns(self, req):
+        """Approve / Reject / Always allow, as one embedded canvas (same pattern as
+        the fill card). Answering is idempotent: the first click wins and the rest
+        are inert, so a double-click can't approve twice."""
+        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2",
+                      takefocus=0)
+        c._ustate = "idle"                  # idle | approved | rejected | always
+        st = {"f": None, "w": 0, "h": 0, "rad": 0, "b1": 0, "b2": 0}
+        answer = req.get("answer")
+
+        def draw(hover=None):
+            c.delete("all")
+            if c._ustate != "idle":
+                msg = {"approved": "✓  Approved",
+                       "rejected": "✕  Rejected — not run",
+                       "always": "✓  Approved (asking no more this session)"}[c._ustate]
+                round_rect(c, 1, 1, st["w"] - 1, st["h"] - 1, st["rad"],
+                           fill=T["tool_bg"], outline="")
+                c.create_text(st["w"] / 2, st["h"] / 2, text=msg, fill=T["muted"],
+                              font=st["f"], anchor="center")
+                return
+            round_rect(c, 1, 1, st["b1"] - 2, st["h"] - 1, st["rad"],
+                       fill=(T["accent_hi"] if hover == "ok" else T["accent"]), outline="")
+            c.create_text(st["b1"] / 2, st["h"] / 2, text="✓  Approve",
+                          fill=T["on_accent"], font=st["f"], anchor="center")
+            round_rect(c, st["b1"] + 2, 1, st["b2"] - 2, st["h"] - 1, st["rad"],
+                       fill=T["tool_bg"], outline="")
+            c.create_text((st["b1"] + st["b2"]) / 2, st["h"] / 2, text="✕  Reject",
+                          fill=(T["err"] if hover == "no" else T["muted"]),
+                          font=st["f"], anchor="center")
+            round_rect(c, st["b2"] + 2, 1, st["w"] - 1, st["h"] - 1, st["rad"],
+                       fill=T["tool_bg"], outline="")
+            c.create_text((st["b2"] + st["w"]) / 2, st["h"] / 2, text="Always allow",
+                          fill=(T["text"] if hover == "always" else T["faint"]),
+                          font=st["f"], anchor="center")
+
+        def render():
+            f = tkfont.Font(root=self.root, font=self.f_small)
+            c._overlay_fonts = [f]
+            pad = self.px(13)
+            w1 = pad + f.measure("✓  Approve") + pad
+            w2 = pad + f.measure("✕  Reject") + pad
+            w3 = pad + f.measure("Always allow") + pad
+            st.update(f=f, h=self.px(26), rad=self.px(7),
+                      b1=w1, b2=w1 + w2, w=max(w1 + w2 + w3,
+                                               pad + f.measure("✓  Approved (asking no more this session)") + pad))
+            c.configure(width=st["w"], height=st["h"])
+            draw()
+
+        def decide(state, ok, always=False):
+            if c._ustate != "idle":
+                return "break"          # first click wins; the rest are inert
+            c._ustate = state
+            draw()
+            self._set_status("")
+            try:
+                self._approval_cards.remove(c)
+            except ValueError:
+                pass
+            if callable(answer):
+                answer(ok, always)
+            return "break"
+
+        def on_click(e):
+            if e.x <= st["b1"]:
+                return decide("approved", True)
+            if e.x <= st["b2"]:
+                return decide("rejected", False)
+            return decide("always", True, True)
+        c._click = on_click                 # testable handle
+        c._decide = decide
+        # Stop / Clear ends the turn, so a still-open card can never be answered —
+        # retire it rather than leaving a live-looking button that does nothing.
+        c._retire = lambda: (decide("rejected", False) if c._ustate == "idle" else None)
+        self._approval_cards.append(c)
+
+        render()
+        c.bind("<Button-1>", on_click)
+        c.bind("<Motion>", lambda e: draw("ok" if e.x <= st["b1"]
+                                          else ("no" if e.x <= st["b2"] else "always")))
+        c.bind("<Leave>", lambda e: draw())
+        c.bind("<MouseWheel>", self._fwd_wheel)
+        self._register_zoomable(c, render)
+        return c
 
     # ── browser form filling: propose → USER APPROVES → fill ──
     def _propose_fill(self, fills):
@@ -2732,8 +2883,15 @@ class Overlay:
 
     # ── chat rendering (main thread only) ──
     def _readonly_keys(self, e):
-        if (e.state & 0x4) and e.keysym.lower() in ("c", "a"):
-            return
+        if (e.state & 0x4) and e.keysym.lower() == "a":
+            # Tk's Text has no default select-all; without this Ctrl+A did nothing
+            # in the transcript. Now it selects the WHOLE conversation — which is
+            # only useful because your own messages are real text (see add_user).
+            self.chat.tag_add("sel", "1.0", "end-1c")
+            self.chat.mark_set("insert", "1.0")
+            return "break"
+        if (e.state & 0x4) and e.keysym.lower() == "c":
+            return              # let Tk's copy of the current selection through
         if e.keysym in ("Up", "Down", "Left", "Right", "Prior", "Next", "Home", "End"):
             return
         return "break"
@@ -2778,6 +2936,12 @@ class Overlay:
         self._prune_chat()
 
     def add_user(self, text):
+        """Your message, rendered as REAL TEXT (tag "user"), not an embedded canvas.
+        Tk cannot select across embedded widgets, so the old bubble made your own
+        messages impossible to select or copy — dragging across the transcript
+        silently skipped them and copied only Claude's replies. Text keeps the card
+        look via tag styling (background + right margin) AND selects normally, so
+        Ctrl+A / drag-select now yields the whole conversation, both sides."""
         self._md_finalize()              # commit the previous turn's last line before a new bubble
         self._turn_raw = ""              # a new turn starts → fresh assistant-answer buffer
         self._turn_copy_added = False
@@ -2785,8 +2949,7 @@ class Overlay:
         self._set_task_badge(any(v.unread for v in self._views))
         at_bottom = self.follow
         self.chat.insert("end", "\n")
-        self.chat.window_create("end", window=self._user_bubble(text), pady=self.px(3))
-        self.chat.insert("end", "\n")
+        self.chat.insert("end", self._clip_bubble(text) + "\n", ("user",))
         try:
             self.chat.tag_remove("current_ah", "1.0", "end")   # a new turn starts; old header
         except Exception:                                       # is no longer the "active" one
@@ -2817,35 +2980,6 @@ class Overlay:
                     run = 0
             out.append(ch)
         return "".join(out)
-
-    def _user_bubble(self, text):
-        """A right-aligned rounded chat bubble (drawn on a full-width canvas). render() recomputes
-        the whole box from a body font at the *current* zoom, so it grows/shrinks with Ctrl +/−
-        like the flowing text — recomputing the box each time means the bigger font never overflows
-        a stale fixed size (the reason this used to be frozen). Registered with _register_zoomable."""
-        text = self._clip_bubble(text)
-        c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0)
-        def render():
-            c.delete("all")
-            full = max(self.px(200), self.chat.winfo_width() - 2 * self.px(18))
-            maxw = max(self.px(140), int(full * 0.74))
-            padx, pady, rad = self.px(13), self.px(9), self.px(14)
-            body_font = tkfont.Font(root=self.root, font=self.f_body)   # current zoom
-            c._overlay_fonts = [body_font]                  # keep a ref so Tk won't GC it
-            tmp = c.create_text(0, 0, text=text, font=body_font, width=maxw, anchor="nw")
-            bb = c.bbox(tmp)
-            x1, y1, x2, y2 = bb if bb else (0, 0, maxw, self.px(18))
-            c.delete(tmp)
-            bw, bh = (x2 - x1) + 2 * padx, (y2 - y1) + 2 * pady
-            bx = full - bw                                  # hug the right edge
-            round_rect(c, bx, 1, bx + bw, bh - 1, rad, fill=T["user_card"], outline="")
-            c.create_text(bx + padx, pady, text=text, font=body_font, fill=T["text"],
-                          width=maxw, anchor="nw")
-            c.configure(width=full, height=bh)
-        render()
-        c.bind("<MouseWheel>", self._fwd_wheel)   # embedded widget must not swallow the scroll
-        self._register_zoomable(c, render)
-        return c
 
     def _ensure_header(self):
         if not self._claude_header:
@@ -3808,6 +3942,7 @@ class Overlay:
 
     def _send_or_stop(self):
         if self.busy:
+            self._retire_approvals()   # Stop must also release a waiting approval
             self.worker.interrupt()
             self._set_status("stopping…")
             return
@@ -4215,6 +4350,7 @@ class Overlay:
         # Interrupt any in-flight turn FIRST. Otherwise the worker is blocked in
         # receive_response() and the reset just queues behind it — meanwhile the tail
         # of the old reply keeps streaming deltas into the chat we just cleared.
+        self._retire_approvals()     # answer any open card, or the turn can't end
         self.worker.interrupt()
         self.chat.delete("1.0", "end")
         self._md_reset()                 # chat wiped → drop md tail/table/fence state + marks
@@ -4785,6 +4921,8 @@ class Overlay:
                          "CLI started a fresh session, so earlier context isn't available.")
         elif kind == "replay":
             self._render_replay(payload)
+        elif kind == "approval":
+            self._render_approval(payload)
         elif kind == "fill_proposal":
             self._render_fill_proposal(payload)
         elif kind == "fill_result":

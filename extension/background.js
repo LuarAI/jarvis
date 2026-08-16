@@ -137,6 +137,12 @@ async function askFrames(tabId, msg) {
     return { results };
   }
 
+  if (msg.action === "read_listings") {
+    // Only one frame can own the job list; take whichever answered with listings.
+    const hit = live.find(({ r }) => (r.listings || []).length);
+    return hit ? { listings: hit.r.listings } : { listings: [] };
+  }
+
   // read_page / list_fields: merge, preferring the top frame's page text but taking
   // fields from every frame (namespaced refs: "2:f7" = frame 2, field f7).
   const fields = [];
@@ -207,7 +213,8 @@ async function handle(msg) {
     }
     const tabId = target.id;
     const tab = target;
-    if (msg.action === "read_page" || msg.action === "list_fields" || msg.action === "fill_fields") {
+    if (msg.action === "read_page" || msg.action === "list_fields"
+        || msg.action === "fill_fields" || msg.action === "read_listings") {
       const res = await askFrames(tabId, msg);
       if (res.error) { reply({ ok: false, error: res.error }); return; }
       reply(Object.assign({ ok: true, tabUrl: tab.url, tabTitle: tab.title }, res));

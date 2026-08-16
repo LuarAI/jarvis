@@ -197,7 +197,9 @@ class TestThumbnails:
         overlay.entry.insert("1.0", "look at this")
         before = len(overlay.chat.window_names())
         overlay._send_or_stop()
-        assert len(overlay.chat.window_names()) > before + 1   # bubble AND thumbnail
+        # the message itself is text now; the thumbnail is the embedded widget
+        assert len(overlay.chat.window_names()) == before + 1
+        assert "look at this" in overlay.chat.get("1.0", "end")
 
     def test_thumbnail_never_upscales(self, overlay, tmp_path):
         from PIL import Image

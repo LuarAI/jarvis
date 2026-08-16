@@ -203,6 +203,37 @@
    * under nav chrome, and the cards' text is a soup of aria labels and "Easy Apply"
    * badges. So extract it structurally: the open posting in full, plus a compact
    * index of the visible cards (title · company · location · flags). */
+  /* The visible job cards, deduped and parsed once — shared by the page-text
+   * extractor and by read_listings. Both the <li> and the .job-card-container
+   * inside it match the selector, so dedupe by job id or every posting appears
+   * twice. */
+  function linkedinCards() {
+    if (!/linkedin\.com/.test(location.hostname)) return [];
+    const t = (n) => (n && (n.innerText || "")).replace(/\s+/g, " ").trim();
+    const seen = new Set();
+    const out = [];
+    for (const el of document.querySelectorAll("li[data-occludable-job-id], .job-card-container")) {
+      const id = el.getAttribute("data-occludable-job-id") || el.getAttribute("data-job-id");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const link = el.querySelector("a.job-card-container__link, a.job-card-list__title--link");
+      const title = (link && (link.getAttribute("aria-label") || t(link))) || "";
+      if (!title) continue;
+      const href = link && link.getAttribute("href");
+      out.push({
+        el, link, id, title,
+        company: t(el.querySelector(".artdeco-entity-lockup__subtitle")),
+        place: t(el.querySelector(".job-card-container__metadata-wrapper, .artdeco-entity-lockup__caption")),
+        foot: t(el.querySelector(".job-card-container__footer-wrapper")),
+        url: href ? "https://www.linkedin.com" + href.split("?")[0] : "",
+        active: !!(el.querySelector('[aria-current="page"]') || el.matches('[aria-current="page"]')
+                   || el.querySelector(".jobs-search-results-list__list-item--active")),
+      });
+      if (out.length >= 40) break;
+    }
+    return out;
+  }
+
   function linkedinJobs() {
     if (!/linkedin\.com/.test(location.hostname)) return null;
     const t = (n) => (n && (n.innerText || "")).replace(/\s+/g, " ").trim();
@@ -214,41 +245,19 @@
       out.push("=== OPEN POSTING ===", (detail.innerText || "").replace(/\n{3,}/g, "\n\n").trim());
     }
 
-    // Both the <li> and the .job-card-container inside it match, so dedupe by job id
-    // (without this every posting was listed twice).
-    const seen = new Set();
-    const cards = Array.from(
-      document.querySelectorAll("li[data-occludable-job-id], .job-card-container")
-    ).filter((c) => {
-      const key = c.getAttribute("data-occludable-job-id") || c.getAttribute("data-job-id");
-      if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    const cards = linkedinCards();
     if (cards.length) {
-      const rows = [];
-      for (const c of cards.slice(0, 40)) {
-        const link = c.querySelector("a.job-card-container__link, a.job-card-list__title--link");
-        const title = (link && (link.getAttribute("aria-label") || t(link))) || "";
-        const company = t(c.querySelector(".artdeco-entity-lockup__subtitle"));
-        const place = t(c.querySelector(".job-card-container__metadata-wrapper, .artdeco-entity-lockup__caption"));
-        const foot = t(c.querySelector(".job-card-container__footer-wrapper"));
-        const href = link && link.getAttribute("href");
-        const id = c.getAttribute("data-occludable-job-id")
-          || (c.getAttribute("data-job-id") || "");
-        const active = c.querySelector('[aria-current="page"]') || c.matches('[aria-current="page"]')
-          || c.querySelector(".jobs-search-results-list__list-item--active");
-        if (!title) continue;
-        rows.push(`${active ? "▶ " : "- "}${title}` +
-                  (company ? ` — ${company}` : "") +
-                  (place ? ` (${place})` : "") +
-                  (foot ? ` [${foot}]` : "") +
-                  (id ? ` #${id}` : "") +
-                  (href ? `\n    https://www.linkedin.com${href.split("?")[0]}` : ""));
-      }
-      if (rows.length) {
-        out.push("", `=== JOB LIST (${rows.length} shown; ▶ = currently open) ===`, rows.join("\n"));
-      }
+      const rows = cards.map((c) =>
+        `${c.active ? "▶ " : "- "}${c.title}` +
+        (c.company ? ` — ${c.company}` : "") +
+        (c.place ? ` (${c.place})` : "") +
+        (c.foot ? ` [${c.foot}]` : "") +
+        (c.id ? ` #${c.id}` : "") +
+        (c.url ? `\n    ${c.url}` : ""));
+      out.push("", `=== JOB LIST (${rows.length} shown; ▶ = currently open) ===`,
+               rows.join("\n"),
+               "", "(Ask me to read them all and I'll open each one for its full "
+               + "description.)");
     }
     return out.length ? out.join("\n") : null;
   }
@@ -372,6 +381,37 @@
           excluded_counts: excluded,
           warnings: warnings.length ? warnings : undefined,
         });
+      } else if (msg.action === "read_listings") {
+        /* Open each job card in turn and collect its full description.
+         *
+         * Only ever runs on an explicit user request ("read all of these"), inside
+         * the tab they are already looking at, at human pace — this is the user
+         * clicking through their own search results, not a crawler: no pagination,
+         * no navigation away, nothing fetched that isn't already on this page. */
+        const cards = linkedinCards();
+        if (!cards.length) { respond({ ok: false, error: "no job list on this page" }); return true; }
+        const want = Math.min(cards.length, (msg.params && msg.params.max) || 8);
+        const out = [];
+        let i = 0;
+        const next = () => {
+          if (i >= want) { respond({ ok: true, listings: out }); return; }
+          const c = cards[i++];
+          try { (c.link || c.el).click(); } catch (e) { /* keep going */ }
+          // wait for the detail pane to swap in, then snapshot it
+          setTimeout(() => {
+            const d = document.querySelector(
+              ".jobs-search__job-details, .jobs-details, .job-view-layout, #job-details");
+            out.push({
+              title: c.title, company: c.company, place: c.place, url: c.url,
+              flags: c.foot,
+              description: d ? (d.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 6000)
+                             : "(description didn't load)",
+            });
+            next();
+          }, 1200);
+        };
+        next();
+        return true;                   // async respond
       } else if (msg.action === "list_fields") {
         const scan = scanFields();
         respond({ ok: true, url: location.href, ats: atsOf(), isTop: window.top === window,

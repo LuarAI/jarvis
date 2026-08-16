@@ -389,10 +389,21 @@ class TestAllowTool:
         else:
             assert isinstance(result, PermissionResultAllow)
 
-    def test_allows_ordinary_tool(self):
-        # Every non-blacklisted tool is still auto-approved (bypass-disabled hosts rely on
-        # this). Mode pinned explicitly: the callback's answer now depends on the ACTIVE
-        # permission mode, and the test must not float with the machine's config.
+    def test_allows_ordinary_read_tool(self):
+        # Reads are auto-approved (bypass-disabled hosts rely on this). Mode pinned
+        # explicitly: the callback's answer depends on the ACTIVE permission mode, and
+        # the test must not float with the machine's config.
+        w = make_worker()
+        w._permission_mode = "bypassPermissions"
+        result = asyncio.run(w._allow_tool("Read", {"file_path": "x"}, None))
+        from worker import PermissionResultAllow
+        assert isinstance(result, PermissionResultAllow)
+
+    def test_actions_are_auto_approved_when_approval_is_off(self, monkeypatch):
+        # With APPROVE_ACTIONS off the old behaviour stands: everything non-blacklisted
+        # runs without asking. (With it ON an action WAITS for the user — that path is
+        # covered in test_approval.py, which answers the card.)
+        monkeypatch.setattr(worker_module, "APPROVE_ACTIONS", False)
         w = make_worker()
         w._permission_mode = "bypassPermissions"
         result = asyncio.run(w._allow_tool("Bash", {"command": "ls"}, None))

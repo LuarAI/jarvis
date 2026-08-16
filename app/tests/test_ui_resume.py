@@ -96,8 +96,8 @@ class TestRenderReplay:
         t = chat_text(overlay)
         assert "missing" in t                       # assistant text rendered
         assert "restored · keep going" in t
-        labels = [str(c) for c in overlay.chat.window_names()]
-        assert labels                               # the user message became a bubble widget
+        # user messages are real text now (selectable), not embedded widgets
+        assert "what does this error mean?" in t
 
     def test_strips_attachment_preambles(self, overlay):
         overlay._render_replay([

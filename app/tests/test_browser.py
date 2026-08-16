@@ -333,7 +333,12 @@ class TestReadOnlyGating:
         res = _run(w._allow_tool("Bash", {}, None))
         assert type(res).__name__ == "PermissionResultDeny"
 
-    def test_fill_allowed_when_not_read_only(self):
+    def test_fill_allowed_when_not_read_only(self, monkeypatch):
+        # Outside plan mode the READ-ONLY gate no longer blocks it. (With approvals on
+        # it would then wait for the user's card — that flow lives in test_approval.py;
+        # here we isolate the read-only question.)
+        import worker as worker_module
+        monkeypatch.setattr(worker_module, "APPROVE_ACTIONS", False)
         w = self._worker("bypassPermissions")
         res = _run(w._allow_tool("mcp__jarvis_browser__browser_fill_form", {}, None))
         assert type(res).__name__ == "PermissionResultAllow"

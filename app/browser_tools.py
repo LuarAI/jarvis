@@ -102,6 +102,33 @@ def build_tools(bridge, propose_fill):
         return {"content": [{"type": "text",
                              "text": f"{len(fields)} fillable field(s):\n{_fmt_fields(fields)}"}]}
 
+    @tool("browser_read_listings",
+          "On a job-search results page (LinkedIn etc.), open each listing in turn "
+          "and return its FULL description — not just the one that's already open. "
+          "Use it when the user asks about several/all of the jobs on screen. It "
+          "clicks through the user's own visible results in their own tab, which "
+          "takes a second or two per job, so use it deliberately, not as a default.",
+          {"type": "object",
+           "properties": {"max": {"type": "integer",
+                                  "description": "how many to open (default 8)"}}})
+    async def read_listings(args):
+        n = int((args or {}).get("max") or 8)
+        res = bridge.request("read_listings", {"max": max(1, min(n, 25))}, timeout=90.0)
+        if res.get("error") or not res.get("ok"):
+            return {"content": [{"type": "text",
+                                 "text": f"Couldn't read the listings: {res.get('error') or 'unknown error'}"}]}
+        rows = res.get("listings") or []
+        if not rows:
+            return {"content": [{"type": "text",
+                                 "text": "No job list found on that page — is it a search-results page?"}]}
+        parts = [f"{len(rows)} listing(s), full descriptions follow.", UNTRUSTED_NOTE]
+        for i, r in enumerate(rows, 1):
+            parts.append(
+                f"\n--- {i}. {r.get('title', '?')} — {r.get('company', '?')} "
+                f"({r.get('place', '?')}) {r.get('flags', '')}\n{r.get('url', '')}\n"
+                f"{r.get('description', '')}")
+        return {"content": [{"type": "text", "text": "\n".join(parts)}]}
+
     @tool("browser_fill_form",
           "Propose values for form fields in the armed tab. This does NOT fill anything: "
           "the user sees every proposed field and value in Jarvis and approves or edits "
@@ -133,7 +160,7 @@ def build_tools(bridge, propose_fill):
         status = propose_fill(fills)
         return {"content": [{"type": "text", "text": status}]}
 
-    return [read_page, list_fields, fill_form]
+    return [read_page, list_fields, read_listings, fill_form]
 
 
 def build_server(bridge, propose_fill):

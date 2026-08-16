@@ -93,6 +93,11 @@ class ClaudeWorker(threading.Thread):
         # skipped or fails. See modelresolve for WHY (streaming alias lag).
         self._initial_model = model if (isinstance(model, str) and model.strip()) else MODEL
         self._resolved_model = self._initial_model
+        # Manual approval of actions (Claude Code-style). _approve_all is the session's
+        # "approve everything from now on" escape hatch, set only by the user clicking
+        # "Always allow" on a card — never by anything the model says.
+        self._approve_all = False
+        self._approval_seq = 0
         # The ACTIVE permission mode. Starts at the caller's launch mode (the UI passes
         # the remembered Read-only state; None → the config constant); the status-bar
         # "Read-only" toggle switches it at run time ("plan" ⇄ the full-access mode).
@@ -264,12 +269,60 @@ class ClaudeWorker(threading.Thread):
     # The browser tools that only READ (the SDK namespaces in-process MCP tools as
     # mcp__<server>__<tool>, so match on the suffix). Kept as a suffix test rather
     # than exact names so an SDK naming change can't silently re-block reading.
+    # NOTE browser_read_listings is deliberately NOT here: it CLICKS through the
+    # user's results, which changes what's on their screen — an action, so it asks.
     _BROWSER_READ_SUFFIXES = ("browser_read_page", "browser_list_fields")
 
     @classmethod
     def _is_browser_read(cls, tool_name):
         name = str(tool_name or "")
         return any(name == s or name.endswith("__" + s) for s in cls._BROWSER_READ_SUFFIXES)
+
+    # Tools that never need asking: they only READ, so approving each one would be
+    # noise (this mirrors Claude Code, which auto-allows reads and asks for writes
+    # and commands). Everything not listed here goes to the user when APPROVE_ACTIONS
+    # is on — including every MCP/browser tool that acts.
+    _AUTO_OK = {
+        "Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite", "NotebookRead",
+        "BashOutput", "ListMcpResources", "ReadMcpResource", "Task", "ExitPlanMode",
+    }
+
+    def _needs_approval(self, tool_name):
+        name = str(tool_name or "")
+        if self._is_browser_read(name):
+            return False                       # reading the armed tab is a read
+        bare = name.split("__")[-1] if "__" in name else name
+        return bare not in self._AUTO_OK
+
+    async def _ask_user(self, tool_name, input_data):
+        """Put an approval card in the chat and WAIT for the click, without blocking
+        Tk or the event loop: the UI answers by setting the future's result from the
+        Tk thread via loop.call_soon_threadsafe. A turn can't hang forever — the SDK's
+        own tool timeout still applies, and Stop cancels the whole turn."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._approval_seq += 1
+        rid = self._approval_seq
+
+        def answer(ok, always=False):
+            # called from the Tk thread
+            if not fut.done():
+                loop.call_soon_threadsafe(fut.set_result, (bool(ok), bool(always)))
+
+        self.ui.put(("approval", {"id": rid, "tool": str(tool_name),
+                                  "input": input_data, "answer": answer}))
+        try:
+            # Bounded: if the card is never answered (window closed, UI wedged, a
+            # headless run with nothing to click) the turn ends with a denial instead
+            # of hanging forever. Generous, because the user may genuinely be reading.
+            ok, always = await asyncio.wait_for(fut, timeout=APPROVAL_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False
+        except asyncio.CancelledError:
+            raise
+        if always:
+            self._approve_all = True
+        return ok
 
     async def _allow_tool(self, tool_name, input_data, context):
         # Run-time guard for interactive tools this GUI can't service. AskUserQuestion
@@ -310,6 +363,16 @@ class ClaudeWorker(threading.Thread):
                         "retry the call or try to exit plan mode — present your findings "
                         "as text, and mention that the user can flip the Read-only "
                         "status-bar toggle off if they want you to make the change.")
+        # Manual approval (the default, like Claude Code in VS Code): show what the
+        # tool would do and wait for Approve / Reject. Reads are auto-allowed so the
+        # card only appears for actions — edits, commands, form fills.
+        if (APPROVE_ACTIONS and not self._approve_all
+                and self._needs_approval(tool_name) and PermissionResultDeny is not None):
+            if not await self._ask_user(tool_name, input_data):
+                return PermissionResultDeny(
+                    message="The user declined this action. Don't retry it; explain "
+                            "what you wanted to do and ask how they'd like to proceed.")
+            return PermissionResultAllow()
         # Auto-approve every other tool. permission_mode="bypassPermissions" already does
         # this on most machines, but managed/enterprise installs can DISABLE bypass
         # mode (managed-settings.json: disableBypassPermissionsMode), which makes the
