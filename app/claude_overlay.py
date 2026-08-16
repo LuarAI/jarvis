@@ -4572,10 +4572,26 @@ class Overlay:
                  f"content-script v{res.get('csVersion', '?')} · "
                  f"cards {res.get('cardCount', 0)} · open job {res.get('openJobId') or '—'} · "
                  f"JSON-LD {res.get('jsonLd', 0)} chars"]
+        frames = res.get("frames") or []
+        if frames:
+            lines.append(f"frames answering ({len(frames)}):")
+            for f in frames:
+                lines.append(f"  [{f.get('frameId')}] cards={f.get('cards')} "
+                             f"maxchars={f.get('chars')}  {f.get('url')}")
         fc = res.get("firstCard")
         if fc:
             lines.append(f"first card: {fc.get('title', '?')} #{fc.get('id', '?')} "
                          f"(link={fc.get('hasLink')}, in-DOM={fc.get('connected')})")
+        lines.append(f"top frame: {res.get('isTop')} · body text: "
+                     f"{res.get('bodyChars', 0)} chars · /jobs/view/ links: "
+                     f"{res.get('jobLinks', 0)}")
+        if res.get("attrs"):
+            lines.append("attributes present: " + ", ".join(
+                f"{k}×{v}" for k, v in (res.get("attrs") or {}).items()))
+        if res.get("viewNames"):
+            top = sorted((res.get("viewNames") or {}).items(),
+                         key=lambda kv: -kv[1])[:8]
+            lines.append("data-view-name values: " + ", ".join(f"{k}×{v}" for k, v in top))
         lines.append("card selectors:")
         for h in res.get("cardSelectors") or []:
             n = h.get("count", 0)
@@ -4584,6 +4600,11 @@ class Overlay:
         for h in res.get("selectors") or []:
             mark = "✓" if h.get("found") else "·"
             lines.append(f"  {mark} {h.get('sel')}  →  {h.get('chars', 0)} chars")
+        if res.get("bigBlocks"):
+            lines.append("biggest text blocks (candidates for the JD):")
+            for b in res.get("bigBlocks"):
+                lines.append(f"  {b.get('len')} chars  id={b.get('id') or '—'}  "
+                             f"class={b.get('cls') or '—'}")
         self.add_sys("\n".join(lines))
 
     def _web_chip_click(self, _e=None):

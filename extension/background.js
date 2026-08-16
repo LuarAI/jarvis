@@ -148,13 +148,27 @@ async function askFrames(tabId, msg) {
   if (msg.action === "read_listings") {
     // Only one frame can own the job list; take whichever answered with listings.
     const hit = live.find(({ r }) => (r.listings || []).length);
-    return hit ? { listings: hit.r.listings, diag: hit.r.diag }
-               : { listings: [], diag: (live[0] && live[0].r.diag) || null };
+    if (hit) return { listings: hit.r.listings, diag: hit.r.diag };
+    // None had any: say which frames we asked, so "no cards" can't be mistaken for
+    // "the page has no jobs" when we simply asked the wrong frame.
+    return { listings: [],
+             diag: live.map(({ frameId, r }) =>
+               `frame ${frameId} (${(frameUrl[frameId] || "?").slice(0, 60)}): `
+               + `${r.cardCount || 0} cards`).concat(
+                 (live.find(({ r }) => r.diag) || { r: {} }).r.diag || []) };
   }
 
   if (msg.action === "probe_layout") {
-    const hit = live.find(({ r }) => r.cardCount) || live[0];
-    return hit ? hit.r : { selectors: [], cardCount: 0 };
+    // Report EVERY frame that answered, with its URL — reporting one arbitrary frame
+    // made an ad iframe's empty result look like the job page having no cards.
+    const best = live.find(({ r }) => r.cardCount) || live[0];
+    return Object.assign({}, best ? best.r : { selectors: [], cardCount: 0 }, {
+      frames: live.map(({ frameId, r }) => ({
+        frameId, url: (frameUrl[frameId] || r.url || "?").slice(0, 80),
+        cards: r.cardCount || 0, chars: (r.selectors || [])
+          .reduce((m, s) => Math.max(m, s.chars || 0), 0),
+      })),
+    });
   }
 
   // read_page / list_fields: merge, preferring the top frame's page text but taking

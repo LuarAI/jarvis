@@ -536,11 +536,49 @@
           try { n = document.querySelectorAll(sel).length; } catch (e) { n = -1; }
           return { sel, count: n };
         });
+        /* Rather than only testing MY guesses, report what the page actually has:
+         * the most common attributes, and the classes of the biggest text blocks.
+         * That turns "everything returned 0" into a list of selectors that exist. */
+        const attrCounts = {};
+        for (const a of ["data-job-id", "data-occludable-job-id", "data-view-name",
+                         "data-component-type", "data-entity-urn", "data-test-id"]) {
+          let n = 0;
+          try { n = document.querySelectorAll(`[${a}]`).length; } catch (e) { n = -1; }
+          if (n) attrCounts[a] = n;
+        }
+        const viewNames = {};
+        try {
+          for (const el of document.querySelectorAll("[data-view-name]")) {
+            const v = el.getAttribute("data-view-name");
+            viewNames[v] = (viewNames[v] || 0) + 1;
+          }
+        } catch (e) { /* none */ }
+        const jobLinks = (() => {
+          try { return document.querySelectorAll("a[href*='/jobs/view/']").length; }
+          catch (e) { return -1; }
+        })();
+        // biggest text blocks — the description is almost certainly one of them
+        const big = [];
+        try {
+          for (const el of document.querySelectorAll("div,section,article,main")) {
+            const len = (el.innerText || "").length;
+            if (len > 800 && el.children.length < 60) {
+              big.push({ cls: (el.className || "").toString().slice(0, 70),
+                         id: el.id || "", len });
+            }
+          }
+          big.sort((a, b) => b.len - a.len);
+        } catch (e) { /* ignore */ }
+
         const cards = linkedinCards();
         respond({ ok: true, url: location.href, selectors: hits, cardSelectors: cardSel,
                   csVersion: JARVIS_CS_VERSION,
                   openJobId: openJobId(),
                   jsonLd: jsonLdPosting().length,
+                  isTop: window.top === window,
+                  bodyChars: (document.body && document.body.innerText || "").length,
+                  attrs: attrCounts, viewNames, jobLinks,
+                  bigBlocks: big.slice(0, 6),
                   cardCount: cards.length,
                   firstCard: cards[0] ? { title: cards[0].title, id: cards[0].id,
                                           hasLink: !!cards[0].link,
