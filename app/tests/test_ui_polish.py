@@ -89,7 +89,7 @@ class TestChatListPanel:
             else:
                 texts.extend(k.cget("text") for k in w.winfo_children()
                              if isinstance(k, co.tk.Label))
-        for lbl, _cmd, _del in overlay._chats_items():
+        for lbl, _cmd, _close, _del in overlay._chats_items():
             assert lbl in texts
         assert overlay.chats_btn.cget("fg") == co.T["accent"]   # lit while open
 
@@ -166,6 +166,31 @@ class TestPlaceholder:
         overlay._ph_key(types.SimpleNamespace(keysym="a", state=0))
         overlay.entry.insert("insert", "can you see this")
         assert overlay._entry_text() == "can you see this"
+
+    def test_entry_text_is_derived_from_the_widget(self, overlay):
+        """The flag can drift; the widget can't. If real words are visible, they must
+        be sendable — the worst bug in this app was text on screen that the app
+        considered empty."""
+        overlay.entry.delete("1.0", "end")
+        overlay.entry.insert("1.0", "these words are real")
+        overlay._ph_active = True                 # flag WRONG on purpose
+        assert overlay._entry_text() == "these words are real"
+
+    def test_placeholder_alone_is_empty(self, overlay):
+        overlay.entry.delete("1.0", "end")
+        overlay.entry.insert("1.0", co.PLACEHOLDER)
+        overlay._ph_active = True
+        assert overlay._entry_text() == ""
+
+    def test_dictation_never_lands_on_the_hint(self, overlay, monkeypatch):
+        """The voice path hit the same bug by a different route: text inserted next
+        to the placeholder, greyed, unsendable."""
+        overlay.entry.delete("1.0", "end")
+        overlay._ph_in()                          # hint showing (unfocused)
+        overlay._on_voice_text("dictated sentence")
+        assert co.PLACEHOLDER not in overlay.entry.get("1.0", "end")
+        assert overlay._entry_text() == "dictated sentence"
+        assert overlay.entry.cget("fg") == co.T["text"]     # not greyed
 
     def test_draft_restore_is_never_greyed(self, overlay):
         v1 = overlay._views[0]

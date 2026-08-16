@@ -14,35 +14,18 @@ const HOST = "com.jarvis.host";
 let port = null;
 let backoff = 1000;
 
-/* Armed-tab state lives in chrome.storage.LOCAL, not .session: session storage is
- * wiped when the extension reloads or the browser restarts, while the toolbar badge
- * is not — so the badge said ON while the stored id was already gone, and Jarvis
- * reported "no tab armed" on a tab the user had clearly armed. Local storage keeps
- * the two in agreement; a stale id is validated (and cleared) on use. */
-async function armedTabId() {
-  const { armedTabId } = await chrome.storage.local.get("armedTabId");
-  return armedTabId || null;
-}
-
-async function setArmed(tabId, note) {
-  await chrome.storage.local.set({ armedTabId: tabId || null });
+/* The badge reflects ONE thing: is the extension talking to the Jarvis overlay.
+ *
+ * It used to mean "this tab is pinned for Jarvis". That pin existed when Jarvis
+ * could only touch a tab you had explicitly handed it — but it now reads whatever
+ * tab you're on, and the 📄 collector captures what you browse, so pinning had no
+ * job left. A badge implying a mode that no longer exists is worse than no badge. */
+async function setConnectedBadge(on) {
   try {
-    await chrome.action.setBadgeText({ text: tabId ? "ON" : "" });
+    await chrome.action.setBadgeText({ text: on ? "ON" : "" });
     await chrome.action.setBadgeBackgroundColor({ color: "#6c5ce7" });
   } catch (e) { /* badge is cosmetic */ }
-  send({ type: "event", event: "tab_armed", tabId, note: note || "" });
 }
-
-/* Re-paint the badge for whatever tab the user is looking at: the badge is
- * per-extension (global), so without this a restored armed id shows ON on every
- * tab, and a lost one shows nothing on the right tab. */
-async function repaintBadge(activeTabId) {
-  const armed = await armedTabId();
-  try {
-    await chrome.action.setBadgeText({ text: (armed && armed === activeTabId) ? "ON" : "" });
-  } catch (e) { /* cosmetic */ }
-}
-chrome.tabs.onActivated.addListener(({ tabId }) => repaintBadge(tabId));
 
 function connect() {
   try {
@@ -52,9 +35,11 @@ function connect() {
     return;
   }
   backoff = 1000;
+  setConnectedBadge(true);
   port.onMessage.addListener(handle);
   port.onDisconnect.addListener(() => {
     port = null;
+    setConnectedBadge(false);
     schedule();
   });
 }
@@ -216,17 +201,8 @@ async function askFrames(tabId, msg) {
 const UNSCRIPTABLE = /^(chrome|edge|about|devtools|view-source):|^https:\/\/chromewebstore\.google\.com|^https:\/\/chrome\.google\.com\/webstore/;
 
 async function targetTab() {
-  const pinnedId = await armedTabId();
-  if (pinnedId) {
-    try {
-      const t = await chrome.tabs.get(pinnedId);
-      if (t && !UNSCRIPTABLE.test(t.url || "")) { t._pinned = true; return t; }
-    } catch (e) {
-      await setArmed(null);        // it was closed — stop claiming it's armed
-    }
-  }
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (active && !UNSCRIPTABLE.test(active.url || "")) { active._pinned = false; return active; }
+  if (active && !UNSCRIPTABLE.test(active.url || "")) return active;
   return null;
 }
 
@@ -238,7 +214,7 @@ async function handle(msg) {
     if (msg.action === "armed_status") {
       const t = await targetTab();
       if (!t) { reply({ ok: true, armed: false }); return; }
-      reply({ ok: true, armed: true, url: t.url, title: t.title, pinned: t._pinned });
+      reply({ ok: true, armed: true, url: t.url, title: t.title });
       return;
     }
 
@@ -276,14 +252,9 @@ async function handle(msg) {
   }
 }
 
-chrome.action.onClicked.addListener((tab) => setArmed(tab.id, tab.url));
-chrome.commands.onCommand.addListener(async (cmd) => {
-  if (cmd !== "arm-tab") return;
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (tab) setArmed(tab.id, tab.url);
-});
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  if ((await armedTabId()) === tabId) setArmed(null);
+// Clicking the toolbar icon just reports status — there is no mode to toggle.
+chrome.action.onClicked.addListener(() => {
+  send({ type: "event", event: "icon_clicked" });
 });
 
 chrome.runtime.onStartup.addListener(connect);

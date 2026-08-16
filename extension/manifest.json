@@ -14,11 +14,5 @@
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_title": "Jarvis: pin this tab" },
-  "commands": {
-    "arm-tab": {
-      "suggested_key": { "default": "Alt+Shift+J" },
-      "description": "Pin the current tab for Jarvis"
-    }
-  }
+  "action": { "default_title": "Jarvis Bridge — connected to the Jarvis overlay" }
 }

@@ -225,6 +225,7 @@ class ChatView:
         self.unread = False             # a background reply finished here since last viewed
         self.first_prompt = ""          # first user message (menu snippet + resume record name)
         self.draft = ""                 # entry text parked while another chat is active
+        self.last_active = time.time()  # last send/reply — the list sorts on this
         self.collecting = False         # 📄 page collector armed for this chat
         self.collect_user_set = False   # the user chose explicitly → auto-arm won't override
         self.collected = {}             # key → {url,title,text,digest} awaiting the next send
@@ -287,6 +288,10 @@ class Overlay:
         self.bridge.start()
         self._pending_fill = None       # the proposal awaiting the user's approval
         self._approval_cards: list = []  # live approval cards, retired on Stop/Clear
+        self._deleted_ids = set()       # tombstones: a late session write must never
+                                        # resurrect a conversation the user deleted
+        self._undo_bar = None           # the "Deleted … Undo" toast, if showing
+        self._undo_timer = None
         self._collect_timer = None      # 📄 collector poll
         self._collect_busy = False      # one snapshot request in flight
         self._collect_tip = None        # hover tooltip listing queued pages
@@ -1241,7 +1246,10 @@ class Overlay:
         self.toggle_screen.bind("<Button-1>", lambda e: self.toggle_auto())
         self._paint_screen_toggle()
         self._chip(st, "Compact", self.compact_now)
-        self._chip(st, "Clear", self.reset)
+        # "Clear" used to live here. It predates multi-chat, when there was one
+        # conversation and no other way to start over; now ✕ Close in the ☰ list does
+        # the same thing with honest naming, and Ctrl+N opens a fresh chat. A third
+        # path to almost-the-same-thing was just something extra to explain.
         # The Window-only / Shareable / Read-only toggles used to sit inline here, which
         # crowded the bar. They now live behind a single ⚙ settings menu (see _gear_menu).
         # The gear turns the accent color while Read-only is ON, so that safety state stays
@@ -1706,39 +1714,106 @@ class Overlay:
             m.grab_release()
 
     # ── ☰ conversation list ──
-    def _chats_items(self):
-        """The (label, open, delete) rows of the ☰ list. Split out from the panel so
-        it's unit-testable without building widgets. ✓ marks the active chat; ●
-        marks a background chat with a finished reply.
+    def _conversations(self):
+        """ONE record per conversation — the single source of truth the list renders.
 
-        One row per conversation — open chats first, then reopenable ones — each
-        carrying its own 🗑 delete (None when it can't be deleted). Earlier versions
-        stacked a "Close this chat", an indented per-chat "Close", AND a separate
-        "Delete" row: three labels for one idea."""
-        items = []
-        for v in self._views:
-            mark = "✓ " if v is self._active else ("● " if v.unread else "    ")
-            busy = "  ⋯" if (v.busy and v is not self._active) else ""
+        This used to be `open_chats + saved_records`, a concatenation of two stores
+        that each held a copy of the same conversation. Closing a chat mutated only
+        one of them, so the conversation reappeared lower down as a "recent" row and
+        deleting felt broken. Now open-ness is a FIELD on one deduped record, so the
+        same conversation can never occupy two rows.
+
+        Returns dicts: {id, name, view (or None), ts, open, unread, busy}."""
+        out = {}
+        for rec in _load_state().get("recent_sessions", []):
+            if not (isinstance(rec, dict) and rec.get("id")):
+                continue
+            if rec.get("cwd") != WORKING_DIR or rec["id"] in self._deleted_ids:
+                continue
+            out[rec["id"]] = {"id": rec["id"], "name": (rec.get("name") or "").strip(),
+                              "view": None, "ts": rec.get("ts") or 0,
+                              "open": False, "unread": False, "busy": False}
+        for v in self._views:                 # live sessions WIN over the saved stub
+            key = v._session_id or f"view:{id(v)}"
             snip = (v.first_prompt or "").strip().replace("\n", " ")
-            label = f"{mark}{v.name}" + (f" — {snip[:30]}" if snip else "") + busy
-            items.append((label, (lambda vv=v: self.switch_chat(vv)),
-                          (lambda vv=v: self.close_chat(vv)) if len(self._views) > 1 else None))
-        for rec in self._recent_choices():
-            age = self._age_str(time.time() - rec["ts"]) if isinstance(rec.get("ts"), (int, float)) else "?"
-            name = (rec.get("name") or "conversation").strip()[:30]
-            items.append((f"↺  {name}  ({age} ago)",
-                          (lambda r=rec: self.reopen_session(r)),
-                          (lambda r=rec: self.delete_recent(r))))
-        items.append(("＋  New chat   (Ctrl+N)", self.new_chat, None))
+            out[key] = {"id": v._session_id, "name": snip or v.name, "view": v,
+                        "ts": max(v.last_active, out.get(key, {}).get("ts", 0)),
+                        "open": True, "unread": v.unread, "busy": v.busy}
+        # most recently active first — what every chat app does, and it floats the
+        # open ones to the top without needing a separate section
+        return sorted(out.values(), key=lambda c: c["ts"], reverse=True)
+
+    def _chats_items(self):
+        """The (label, open, close, delete) rows of the ☰ list. Split out from the
+        panel so it's unit-testable without building widgets.
+
+        ✓ marks the active chat, ● an unread one. Every row carries TWO distinct
+        actions, because conflating them is what made deletion look broken:
+            ✕  close  — end the live session; the conversation stays, resumable
+            🗑  delete — remove it from memory AND disk, atomically, forever
+        No app puts a trash can on a hide/close action; the trash must mean gone."""
+        items = []
+        for c in self._conversations():
+            v = c["view"]
+            mark = "✓ " if (v is not None and v is self._active) else ("● " if c["unread"] else "    ")
+            busy = "  ⋯" if c["busy"] and v is not self._active else ""
+            age = ""
+            if not c["open"] and c["ts"]:
+                age = f"   ({self._age_str(time.time() - c['ts'])} ago)"
+            name = (c["name"] or "conversation")[:34]
+            label = f"{mark}{name}{age}{busy}"
+            if v is not None:
+                open_cmd = (lambda vv=v: self.switch_chat(vv))
+                close_cmd = ((lambda vv=v: self.close_chat(vv))
+                             if len(self._views) > 1 else None)
+            else:
+                open_cmd = (lambda cc=c: self.reopen_session({"id": cc["id"],
+                                                              "name": cc["name"]}))
+                close_cmd = None              # already closed
+            items.append((label, open_cmd, close_cmd,
+                          (lambda cc=c: self.delete_conversation(cc))))
+        items.append(("＋  New chat   (Ctrl+N)", self.new_chat, None, None))
         return items
 
-    def delete_recent(self, rec):
-        """Remove a saved conversation from the ☰ list. The CLI's own transcript on
-        disk is untouched (that's Claude Code's store, not ours) — this forgets our
-        pointer to it, which is what "delete this chat" means from the list."""
-        name = (rec.get("name") or "conversation").strip()[:40]
-        self._forget_recent(rec.get("id"))
-        self.add_sys(f"🗑 Removed “{name}” from your conversations.")
+    def delete_conversation(self, c):
+        """The ONLY delete path, and it is atomic: the live session (if any) is closed
+        AND the persisted record forgotten AND the id tombstoned, in one operation.
+        The previous split — close here, forget there — is exactly why a deleted
+        conversation came back. Offers Undo instead of a confirmation dialog: pruning
+        a list is frequent and low-stakes, and a modal per row is confirmation fatigue
+        (NN/g), especially in a small floating window."""
+        name = (c.get("name") or "conversation")[:40]
+        sid = c.get("id")
+        v = c.get("view")
+        snapshot = None
+        for rec in _load_state().get("recent_sessions", []):
+            if isinstance(rec, dict) and rec.get("id") == sid:
+                snapshot = dict(rec)
+                break
+        if sid:
+            self._deleted_ids.add(sid)        # tombstone: a late write can't resurrect it
+            self._forget_recent(sid)
+        if v is not None and len(self._views) > 1:
+            self.close_chat(v)
+        elif v is not None:
+            self.reset()                      # the only chat: empty it rather than orphan it
+        self._refresh_chats_chip()
+        self._show_undo(f"🗑 Deleted “{name}”",
+                        lambda: self._undo_delete(sid, snapshot, name))
+
+    def _undo_delete(self, sid, snapshot, name):
+        """Put the record back. The live session isn't restored (its worker is gone),
+        but the conversation returns as resumable — which is what the row offered."""
+        self._deleted_ids.discard(sid)
+        if snapshot:
+            recents = [r for r in _load_state().get("recent_sessions", [])
+                       if isinstance(r, dict) and r.get("id") != sid]
+            _save_state(recent_sessions=([snapshot] + recents)[:8])
+        self.add_sys(f"↩ Restored “{name}”.")
+        self._refresh_chats_chip()
+        if getattr(self, "_chat_list_frame", None) is not None:
+            self._hide_chat_list()
+            self.toggle_chat_list()           # redraw the list with it back
 
     def toggle_chat_list(self):
         """☰ (top-left): swap the transcript for a full-panel conversation list — the
@@ -1751,10 +1826,9 @@ class Overlay:
         f = tk.Frame(self.chat_area, bg=T["bg"])
         tk.Label(f, text="Conversations", bg=T["bg"], fg=T["muted"], font=self.f_chip,
                  anchor="w").pack(fill="x", padx=self.px(16), pady=(self.px(10), self.px(2)))
-        for lbl, cmd, delete in self._chats_items():
-            # One row per conversation: the label opens it, the 🗑 on the right
-            # deletes it. Both live on the same line — a separate indented row
-            # under the name read as a different, confusing item.
+        for lbl, cmd, close, delete in self._chats_items():
+            # One row per conversation, with two HONEST actions on the same line:
+            # ✕ closes the live session (it stays, resumable), 🗑 deletes it for good.
             row = tk.Frame(f, bg=T["bg"])
             row.pack(fill="x")
             name = tk.Label(row, text=lbl, anchor="w", justify="left", bg=T["bg"],
@@ -1764,12 +1838,20 @@ class Overlay:
             kids = [row, name]
             if delete is not None:
                 trash = tk.Label(row, text="🗑", bg=T["bg"], fg=T["faint"],
-                                 font=self.f_small, padx=self.px(12), cursor="hand2")
+                                 font=self.f_small, padx=self.px(10), cursor="hand2")
                 trash.pack(side="right")
                 trash.bind("<Button-1>", lambda e, d=delete: self._chat_list_action(d))
                 trash.bind("<Enter>", lambda e, t=trash: t.configure(fg=T["err"]))
                 trash.bind("<Leave>", lambda e, t=trash: t.configure(fg=T["faint"]))
                 kids.append(trash)
+            if close is not None:
+                x = tk.Label(row, text="✕", bg=T["bg"], fg=T["faint"],
+                             font=self.f_small, padx=self.px(8), cursor="hand2")
+                x.pack(side="right")
+                x.bind("<Button-1>", lambda e, c=close: self._chat_list_action(c))
+                x.bind("<Enter>", lambda e, w=x: w.configure(fg=T["text"]))
+                x.bind("<Leave>", lambda e, w=x: w.configure(fg=T["faint"]))
+                kids.append(x)
             for w in kids:
                 w.bind("<Enter>", lambda e, ws=kids: [x.configure(bg=T["hover"]) for x in ws],
                        add="+")
@@ -1781,6 +1863,51 @@ class Overlay:
         f.pack(fill="both", expand=True)
         self._chat_list_frame = f
         self._refresh_chats_chip()
+
+    def _show_undo(self, message, undo):
+        """A small toast above the input: '🗑 Deleted "x"   Undo'. Undo rather than a
+        confirmation dialog — deleting conversations is frequent and low-stakes, and a
+        modal per row is the confirmation fatigue NN/g warns about. It carries an
+        action, so it does NOT auto-dismiss on a short timer (Material's rule: a
+        snackbar with an action must stay reachable); it clears on click or after a
+        generous window."""
+        self._hide_undo()
+        bar = tk.Frame(self.root, bg=T["tool_bg"])
+        tk.Label(bar, text=message, bg=T["tool_bg"], fg=T["text"], font=self.f_small,
+                 anchor="w").pack(side="left", padx=(self.px(14), self.px(8)),
+                                  pady=self.px(6))
+        act = tk.Label(bar, text="Undo", bg=T["tool_bg"], fg=T["accent"],
+                       font=self.f_chip, cursor="hand2")
+        act.pack(side="left", padx=(0, self.px(10)))
+        dismiss = tk.Label(bar, text="✕", bg=T["tool_bg"], fg=T["faint"],
+                           font=self.f_small, cursor="hand2")
+        dismiss.pack(side="right", padx=(0, self.px(12)))
+
+        def do_undo(_e=None):
+            self._hide_undo()
+            try:
+                undo()
+            except Exception:
+                pass
+        act.bind("<Button-1>", do_undo)
+        dismiss.bind("<Button-1>", lambda e: self._hide_undo())
+        bar.pack(fill="x", side="bottom", before=self.input_wrap)
+        self._undo_bar = bar
+        self._undo_timer = self.root.after(12000, self._hide_undo)
+
+    def _hide_undo(self, _e=None):
+        t, self._undo_timer = getattr(self, "_undo_timer", None), None
+        if t is not None:
+            try:
+                self.root.after_cancel(t)
+            except Exception:
+                pass
+        bar, self._undo_bar = getattr(self, "_undo_bar", None), None
+        if bar is not None:
+            try:
+                bar.destroy()
+            except Exception:
+                pass
 
     def _chat_list_action(self, cmd):
         self._hide_chat_list()
@@ -1877,8 +2004,7 @@ class Overlay:
                 return ""
             title = str(res.get("title") or "").strip()[:120]
             url = str(res.get("url") or "").strip()[:300]
-            how = "pinned for you" if res.get("pinned") else "open in front of them"
-            return (f"\n\n[Browser: the user has a page {how} — \"{title}\" — {url}. "
+            return (f"\n\n[Browser: the user is looking at \"{title}\" — {url}. "
                     "If this message relates to it, call browser_read_page to see it "
                     "(text and form fields) instead of asking them to paste anything.]")
         except Exception:
@@ -2466,10 +2592,16 @@ class Overlay:
             self.add_sys("🎙 Didn't catch any words — try again a little closer to the mic.")
             return
         # Into the entry AT THE CURSOR, for review — never auto-sent. A trailing space
-        # so consecutive dictations join cleanly.
-        self._ph_out()
-        self.entry.insert("insert", text.strip() + " ")
+        # so consecutive dictations join cleanly. Clear the hint FIRST and take focus,
+        # or the dictated words land beside a greyed placeholder and can't be sent —
+        # the same failure typing used to have, reached by a different path.
         self.entry.focus_set()
+        self._ph_out()
+        if self.entry.get("1.0", "end").strip() == PLACEHOLDER:
+            self.entry.delete("1.0", "end")     # belt and braces: never dictate onto the hint
+            self._ph_active = False
+        self.entry.configure(fg=T["text"])
+        self.entry.insert("insert", text.strip() + " ")
 
     # ── rounded input layout ──
     def _layout_input(self, e=None):
@@ -2596,7 +2728,20 @@ class Overlay:
         self._ph_out()
 
     def _entry_text(self):
-        return "" if self._ph_active else self.entry.get("1.0", "end").strip()
+        """What the user actually typed.
+
+        Derived from the WIDGET, not from a flag: _ph_active was set from several
+        directions (focus in/out, chat switch, voice insert) and any one of them
+        getting out of step produced the worst possible bug — text visibly in the box
+        that the app considered empty, so Enter did nothing. If the content differs
+        from the placeholder, it's real."""
+        raw = self.entry.get("1.0", "end").strip()
+        if not raw or raw == PLACEHOLDER:
+            return ""
+        # a stale hint sitting beside real text (the historic failure) — drop it
+        if self._ph_active and raw.startswith(PLACEHOLDER):
+            raw = raw[len(PLACEHOLDER):].strip()
+        return raw
 
     def _clipboard_has_image(self):
         """Cheap, non-blocking probe (no OLE render): should this paste be treated as an image?
@@ -3902,6 +4047,10 @@ class Overlay:
         recent first, one entry per session id)."""
         if not self._session_id:
             return
+        if self._session_id in self._deleted_ids:
+            return          # tombstoned: a turn finishing after a delete must not
+                            # write the conversation back into the list
+        self._cur.last_active = time.time()
         rec = {"id": self._session_id, "ts": time.time(), "cwd": WORKING_DIR,
                "name": (self._cur.first_prompt or "").strip()[:60]}
         recents = [r for r in _load_state().get("recent_sessions", [])
@@ -4191,8 +4340,9 @@ class Overlay:
         label = text if text else "(look at my screens)"
         if n:
             label += (f"   🖼×{n}" if n > 1 else "   🖼")
-        if text and not self._cur.first_prompt:   # 💬-menu snippet + Reopen-record name
+        if text and not self._cur.first_prompt:   # ☰-list snippet + Reopen-record name
             self._cur.first_prompt = text[:60]
+        self._cur.last_active = time.time()       # the ☰ list sorts by this
         browser_note = self._armed_tab_note()     # arming a tab IS the "look here" gesture
         collected = self._collected_block()       # pages browsed since the last send
         self.add_user(label)
@@ -4826,11 +4976,9 @@ class Overlay:
     def _web_chip_click(self, _e=None):
         res = self.bridge.request("armed_status", timeout=3.0) if self.bridge else {}
         if isinstance(res, dict) and res.get("armed"):
-            how = ("📌 Pinned" if res.get("pinned") else "Currently open")
-            self.add_sys(f"🌐 {how}: {res.get('title') or ''}\n{res.get('url') or ''}\n"
-                         "Just ask about it — I'll read it automatically. Alt+Shift+J "
-                         "in Chrome pins a tab so I keep reading it even while you "
-                         "browse elsewhere.")
+            self.add_sys(f"🌐 Chrome is connected. You're looking at:\n"
+                         f"{res.get('title') or ''}\n{res.get('url') or ''}\n"
+                         "Just ask about it — I read the tab you're on.")
         else:
             self.add_sys("🌐 Chrome extension connected, but I can't see a usable tab. "
                          "Open a normal web page (not chrome:// or the Web Store) and "

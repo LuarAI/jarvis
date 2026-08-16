@@ -35,7 +35,7 @@ This is deliberately **not** a scraper: it only ever captures pages *you* opened
 2. In Jarvis, just ask — it reads **the tab you're looking at**:
    - *"What does this job ask for?"* → it reads the page
    - *"Fill this application from my CV"* → it proposes values
-3. Optional: press **Alt+Shift+J** (or click the Jarvis toolbar icon) to **pin** that tab — the icon shows `ON` and Jarvis keeps reading that page even while you browse elsewhere. Press it again on another tab to move the pin.
+3. That's it — Jarvis reads the tab you're on. The toolbar badge shows `ON` when the extension is connected to the overlay; it isn't a mode you switch.
 4. Jarvis shows **every proposed field and value** with **Fill** / **Cancel**. Nothing is typed until you click Fill.
 5. Review the page and **submit it yourself** — Jarvis never submits forms.
 
@@ -57,7 +57,7 @@ This is deliberately **not** a scraper: it only ever captures pages *you* opened
 | File | Role |
 |---|---|
 | `manifest.json` | MV3 manifest — permissions and entry points |
-| `background.js` | Service worker: the one long-lived native-messaging port; tracks the armed tab |
+| `background.js` | Service worker: the one long-lived native-messaging port; routes requests to the active tab's frames |
 | `content.js` | Runs in the page: field extraction, safety filters, and the fill routine |
 | `../host/jarvis_host.py` | Native host proxy Chrome spawns; relays to the running Jarvis overlay |
 | `../host/install.cmd` | Writes the host manifest + registry key |
@@ -65,7 +65,7 @@ This is deliberately **not** a scraper: it only ever captures pages *you* opened
 ## Troubleshooting
 
 - **"Couldn't reach the page"** — reload the tab. Chrome cannot read `chrome://` pages, the Web Store, or PDF viewers at all.
-- **The shortcut opens DevTools** — you're on an older build: the pin shortcut is **Alt+Shift+J** (Ctrl+Shift+J is Chrome's own DevTools binding and can't be overridden). Reload the extension. You can rebind it at `chrome://extensions/shortcuts`.
+- **The badge says `ON` but Jarvis can't read the page** — `ON` only means the extension reached the overlay. If reading fails, run ⚙ → **Diagnose browser page** in Jarvis; it reports which frame answered and what it found.
 - **"Jarvis isn't running"** — start the overlay; the proxy finds it via `%LOCALAPPDATA%\Jarvis\ipc.json`.
 - **Nothing connects** — check the extension ID in `host/com.jarvis.host.json` matches `chrome://extensions`, then restart Chrome. Host errors go to Chrome's log (`chrome://extensions` → the extension's "service worker" link → Console).
 - **A field wouldn't fill** — some sites (Workday especially) use custom dropdowns; Jarvis reports which fields failed so you can finish them by hand.

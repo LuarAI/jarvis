@@ -188,32 +188,33 @@ class TestChatsMenu:
         v1.unread = True
         # chat numbers keep climbing across the shared-fixture session, so assert on
         # the views' real names rather than hardcoding "Chat 1"
-        labels = [lbl for lbl, _c, _d in overlay._chats_items()]
+        labels = [lbl for lbl, _o, _c, _d in overlay._chats_items()]
         assert any(lbl.startswith("● ") and v1.name in lbl for lbl in labels)
-        assert any(lbl.startswith("✓ ") and v2.name in lbl for lbl in labels)
+        assert any(lbl.startswith("✓ ") for lbl in labels)
 
-    def test_one_delete_action_per_chat_not_three(self, overlay):
-        """Regression: the list used to carry a per-chat "Close", a global "Close
-        this chat" AND a "Delete" row — three labels for one idea."""
+    def test_two_distinct_actions_per_row(self, overlay):
+        """✕ closes (conversation survives), 🗑 deletes (gone). Conflating them —
+        two trash cans meaning different things — is what made deletion look broken."""
         overlay.new_chat()
-        rows = overlay._chats_items()
-        labels = [lbl for lbl, _c, _d in rows]
-        assert not any("Close this chat" in l for l in labels)
-        assert not any(l.startswith("     ") for l in labels)      # no indented rows
-        chat_rows = [r for r in rows if "New chat" not in r[0]]
-        for _lbl, open_cmd, delete_cmd in chat_rows:
-            assert callable(open_cmd) and callable(delete_cmd)     # one of each, inline
+        rows = [r for r in overlay._chats_items() if "New chat" not in r[0]]
+        assert not any(l.startswith("     ") for l, *_ in rows)      # no indented rows
+        for _lbl, open_cmd, close_cmd, delete_cmd in rows:
+            assert callable(open_cmd)
+            assert callable(delete_cmd)                              # delete always offered
+            assert close_cmd is None or callable(close_cmd)
 
-    def test_single_chat_has_no_delete(self, overlay):
+    def test_single_chat_cannot_be_closed_but_can_be_deleted(self, overlay):
+        co._save_state(recent_sessions=[])       # only the open chat in the list
         rows = [r for r in overlay._chats_items() if "New chat" not in r[0]]
         assert len(rows) == 1
-        assert rows[0][2] is None            # the only chat can't be deleted
+        assert rows[0][2] is None            # nothing to close down to
+        assert callable(rows[0][3])          # but deleting/emptying it is fine
 
     def test_new_chat_row_wired(self, overlay):
         rows = overlay._chats_items()
         new = next(r for r in rows if "New chat" in r[0])
         assert new[1] == overlay.new_chat
-        assert new[2] is None                # nothing to delete on the "new" row
+        assert new[2] is None and new[3] is None    # nothing to close or delete
 
     def test_first_prompt_snippet_in_row(self, overlay, monkeypatch):
         monkeypatch.setattr(co.authstate, "dead_reason", lambda: None)
@@ -221,7 +222,7 @@ class TestChatsMenu:
         overlay._ph_out()
         overlay.entry.insert("1.0", "review my resume please")
         overlay._send_or_stop()
-        labels = [lbl for lbl, _c, _d in overlay._chats_items()]
+        labels = [lbl for lbl, _o, _c, _d in overlay._chats_items()]
         assert any("review my resume" in lbl for lbl in labels)
 
 

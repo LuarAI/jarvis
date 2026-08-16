@@ -352,7 +352,7 @@ class TestSystemPromptMentionsBrowser:
         # Without this the model never calls the tools — it falls back to screenshots
         # or asks the user to paste the page (the bug this test locks down).
         assert "browser_read_page" in p and "browser_fill_form" in p
-        assert "Alt+Shift+J" in p
+        assert "tab the user is looking at" in p
         assert "untrusted" in p.lower()
         assert "never claim you" in p.lower()
 
@@ -465,14 +465,15 @@ class TestArmedTabNote:
         assert "Senior Dev at Acme" in note and "greenhouse.io" in note
         assert "browser_read_page" in note
 
-    def test_note_distinguishes_pinned_from_merely_open(self, overlay, monkeypatch):
+    def test_note_names_the_tab_without_pinning_jargon(self, overlay, monkeypatch):
+        # The pin (and its Alt+Shift+J shortcut) is gone — Jarvis reads the tab you
+        # are on, so the note must not talk about modes that no longer exist.
         monkeypatch.setattr(type(overlay.bridge), "connected", property(lambda s: True))
         monkeypatch.setattr(overlay.bridge, "request", lambda a, p=None, timeout=None: {
-            "ok": True, "armed": True, "pinned": True, "title": "T", "url": "https://x.test"})
-        assert "pinned" in overlay._armed_tab_note()
-        monkeypatch.setattr(overlay.bridge, "request", lambda a, p=None, timeout=None: {
-            "ok": True, "armed": True, "pinned": False, "title": "T", "url": "https://x.test"})
-        assert "open in front of them" in overlay._armed_tab_note()
+            "ok": True, "armed": True, "title": "A Job", "url": "https://x.test"})
+        note = overlay._armed_tab_note()
+        assert "looking at" in note and "A Job" in note
+        assert "pin" not in note.lower() and "Alt+Shift" not in note
 
     def test_no_note_when_nothing_armed(self, overlay, monkeypatch):
         self._armed(overlay, monkeypatch, armed=False)
@@ -509,26 +510,90 @@ class TestDeleteChats:
         co._save_state(recent_sessions=[
             {"id": "keep-me", "ts": time.time(), "cwd": co.WORKING_DIR, "name": "keep"},
             {"id": "drop-me", "ts": time.time(), "cwd": co.WORKING_DIR, "name": "drop"}])
-        overlay.delete_recent({"id": "drop-me", "name": "drop"})
+        overlay.delete_conversation({"id": "drop-me", "name": "drop", "view": None})
         ids = [r["id"] for r in co._load_state()["recent_sessions"]]
         assert ids == ["keep-me"]
-        assert "Removed" in overlay.chat.get("1.0", "end")
 
     def test_saved_conversation_row_carries_its_own_delete(self, overlay):
         co._save_state(recent_sessions=[
             {"id": "s1", "ts": time.time(), "cwd": co.WORKING_DIR, "name": "cover letter"}])
         row = next(r for r in overlay._chats_items() if "cover letter" in r[0])
-        assert row[0].startswith("↺")        # reopen on click…
-        assert callable(row[2])              # …delete on the row's own 🗑
+        assert callable(row[1])              # click reopens it
+        assert row[2] is None                # already closed — nothing to close
+        assert callable(row[3])              # 🗑 deletes it
 
     def test_every_open_chat_row_has_a_delete_when_several(self, overlay):
         co._save_state(recent_sessions=[])     # only OPEN chats in this assertion
         overlay.new_chat()
-        open_names = {v.name for v in overlay._views}
-        chat_rows = [r for r in overlay._chats_items()
-                     if any(n in r[0] for n in open_names)]
-        assert len(chat_rows) == len(overlay._views) >= 2
-        assert all(callable(r[2]) for r in chat_rows)   # one delete each, inline
+        chat_rows = [r for r in overlay._chats_items() if "New chat" not in r[0]]
+        assert len(chat_rows) >= 2
+        assert all(callable(r[3]) for r in chat_rows)   # one delete each, inline
+
+    def test_deleted_conversation_never_reappears(self, overlay):
+        """THE bug: deleting an open chat closed it but left the persisted record, so
+        the same conversation came back lower down as a reopenable row."""
+        v = overlay.new_chat()
+        v._session_id = "sess-dup"
+        v.first_prompt = "the one I deleted"
+        overlay._persist_session_for(v) if hasattr(overlay, "_persist_session_for") else None
+        co._save_state(recent_sessions=[{"id": "sess-dup", "ts": time.time(),
+                                         "cwd": co.WORKING_DIR, "name": "the one I deleted"}])
+        row = next(r for r in overlay._chats_items() if "deleted" in r[0])
+        row[3]()                                        # 🗑
+        labels = [r[0] for r in overlay._chats_items()]
+        assert not any("deleted" in l for l in labels)  # gone from the list entirely
+        assert all(r.get("id") != "sess-dup"
+                   for r in co._load_state().get("recent_sessions", []))
+
+    def test_one_row_per_conversation_even_when_persisted(self, overlay):
+        """An open chat and its saved record are the SAME conversation — one row."""
+        v = overlay.new_chat()
+        v._session_id = "sess-one"
+        v.first_prompt = "single row please"
+        co._save_state(recent_sessions=[{"id": "sess-one", "ts": time.time(),
+                                         "cwd": co.WORKING_DIR, "name": "single row please"}])
+        rows = [r for r in overlay._chats_items() if "single row please" in r[0]]
+        assert len(rows) == 1
+
+    def test_tombstone_survives_a_late_write(self, overlay):
+        """A turn finishing AFTER a delete must not write the conversation back."""
+        v = overlay._views[0]
+        v._session_id = "sess-late"
+        v.first_prompt = "late writer"
+        overlay.delete_conversation({"id": "sess-late", "name": "late writer", "view": None})
+        overlay._persist_session()                       # the late write
+        assert all(r.get("id") != "sess-late"
+                   for r in co._load_state().get("recent_sessions", []))
+
+    def test_undo_restores_a_deleted_conversation(self, overlay):
+        co._save_state(recent_sessions=[{"id": "sess-undo", "ts": time.time(),
+                                         "cwd": co.WORKING_DIR, "name": "brought back"}])
+        row = next(r for r in overlay._chats_items() if "brought back" in r[0])
+        row[3]()                                         # delete
+        assert overlay._undo_bar is not None             # the toast is showing
+        assert not any("brought back" in r[0] for r in overlay._chats_items())
+        overlay._undo_delete("sess-undo",
+                             {"id": "sess-undo", "ts": time.time(),
+                              "cwd": co.WORKING_DIR, "name": "brought back"},
+                             "brought back")
+        assert any("brought back" in r[0] for r in overlay._chats_items())
+
+    def test_delete_offers_undo_not_a_modal(self, overlay):
+        co._save_state(recent_sessions=[{"id": "s-x", "ts": time.time(),
+                                         "cwd": co.WORKING_DIR, "name": "x"}])
+        overlay.delete_conversation({"id": "s-x", "name": "x", "view": None})
+        assert overlay._undo_bar is not None
+        overlay._hide_undo()
+        assert overlay._undo_bar is None
+
+    def test_list_sorted_by_recency(self, overlay):
+        now = time.time()
+        co._save_state(recent_sessions=[
+            {"id": "old", "ts": now - 9000, "cwd": co.WORKING_DIR, "name": "older one"},
+            {"id": "new", "ts": now - 10, "cwd": co.WORKING_DIR, "name": "newer one"}])
+        labels = [r[0] for r in overlay._chats_items() if "one" in r[0]]
+        assert labels.index(next(l for l in labels if "newer" in l)) < \
+               labels.index(next(l for l in labels if "older" in l))
 
     def test_close_a_background_chat_directly(self, overlay):
         v1 = overlay._views[0]
