@@ -110,15 +110,40 @@ TABLE = (
 )
 
 
-def test_table_still_renders_as_a_canvas(overlay):
-    """The user likes how tables look — copying must not change the rendering."""
+def test_table_is_real_selectable_text(overlay):
+    """The whole point: a table drawn on a canvas has no characters to select, so it
+    was invisible to both highlighting and any select-all copy."""
     overlay.add_delta(TABLE)
     overlay._md_finalize()
     overlay.root.update_idletasks()
-    cvs = [w for w in _windows(overlay) if hasattr(w, "_on_copy_click")]
-    assert cvs, "the table canvas is gone"
-    flat = _canvas_text(cvs[0])
-    assert "Noxx FDE" in flat and "$7,500 ask" in flat
+    overlay.chat.tag_add("sel", "1.0", "end-1c")
+    selected = overlay.chat.get("sel.first", "sel.last")
+    assert "Noxx FDE" in selected
+    assert "$7,500 ask" in selected
+    assert "declined their $2,400" in selected
+
+
+def test_table_columns_line_up(overlay):
+    """Alignment is what makes it read as a table without vertical rules."""
+    overlay.add_delta(TABLE)
+    overlay._md_finalize()
+    txt = chat_text(overlay)
+    # the second column starts at the same offset on every row, header included
+    marks = [("Application", "Status"), ("Noxx FDE", "$7,500"),
+             ("Mappa", "declined")]
+    starts = []
+    for row_key, col2 in marks:
+        line = next(ln for ln in txt.split("\n") if ln.startswith(row_key))
+        starts.append(line.index(col2))
+    assert len(set(starts)) == 1, f"second column not aligned: {starts}"
+
+
+def test_table_has_a_header_rule_but_no_vertical_rules(overlay):
+    overlay.add_delta(TABLE)
+    overlay._md_finalize()
+    txt = chat_text(overlay)
+    assert "─" in txt, "no rule under the header"
+    assert "|" not in txt, "pipes are markdown source, not a rendered table"
 
 
 def test_table_tsv_is_tab_separated(overlay):
@@ -142,58 +167,53 @@ def test_table_tsv_neutralises_embedded_tabs(overlay):
     assert tsv.split("\n")[1].count("\t") == 1, "an embedded tab invented a column"
 
 
-def test_table_copy_click_puts_tsv_on_the_clipboard(overlay):
+def test_table_copy_button_puts_tsv_on_the_clipboard(overlay):
     overlay.add_delta(TABLE)
     overlay._md_finalize()
     overlay.root.update_idletasks()
-    cvs = [w for w in _windows(overlay) if hasattr(w, "_on_copy_click")]
-    assert cvs, "no table canvas"
-    cv = cvs[0]
-
-    class _Evt:
-        pass
-    e = _Evt()
-    # click the icon's own hit box (a click elsewhere in the table must do nothing)
-    box = cv._copy_box
-    e.x = (box[0] + box[2]) / 2
-    e.y = (box[1] + box[3]) / 2
-    assert cv._on_copy_click(e) == "break"
+    btns = [w for w in _windows(overlay) if hasattr(w, "_on_click")]
+    assert btns, "no Copy button under the table"
+    assert btns[-1]._on_click(None) == "break"
     got = overlay.root.clipboard_get()
-    assert "\t" in got
     assert "Noxx FDE\t$7,500 ask" in got
     assert "Mappa\tdeclined their $2,400" in got
     assert "|" not in got
 
 
-def test_copy_icon_never_sits_on_the_header_text(overlay):
-    """The icon lives in the last header cell's corner, so that cell must give up room
-    for it — otherwise a long header renders straight through the glyph."""
-    overlay.add_delta("| A | This is a very long header cell that wants all the room |\n"
-                      "| --- | --- |\n| x | y |\n")
+def test_wide_table_wraps_instead_of_truncating(overlay):
+    """Truncation would silently corrupt what you paste — the copy is the point."""
+    long_note = ("this is a very long note that cannot possibly fit inside a narrow "
+                 "overlay column without being wrapped onto several lines")
+    overlay.add_delta(f"| Item | Note |\n| --- | --- |\n| Thing | {long_note} |\n")
     overlay._md_finalize()
+    txt = chat_text(overlay)
+    assert "…" not in txt and "..." not in txt, "a cell was truncated"
+    # every word survives somewhere in the rendered table
+    for word in long_note.split():
+        assert word in txt, f"{word!r} was lost in wrapping"
+
+
+def test_alignment_survives_a_row_where_both_columns_wrap(overlay):
+    """The continuation lines of column 1 must still pad to full width, or column 2
+    slides left on every wrapped row."""
     overlay.root.update_idletasks()
-    cv = [w for w in _windows(overlay) if hasattr(w, "_on_copy_click")][0]
-    icon_left = cv._copy_box[0]
-    for i in cv.find_all():
-        if cv.type(i) != "text":
-            continue
-        label = cv.itemcget(i, "text")
-        if label in ("⧉", "✓"):                     # the copy glyph is allowed to be there
-            continue
-        bb = cv.bbox(i)
-        if bb and bb[1] < cv._copy_box[3]:          # a text item on the header row
-            assert bb[2] <= icon_left, (
-                f"header text {label!r} runs under the copy icon")
-
-
-def test_click_elsewhere_in_the_table_is_not_a_copy(overlay):
-    overlay.add_delta(TABLE)
+    overlay.add_delta("| Application | Status |\n| --- | --- |\n"
+                      "| Noxx client Founding Engineer SF in-person role"
+                      " | first second third fourth |\n")
     overlay._md_finalize()
-    overlay.root.update_idletasks()
-    cv = [w for w in _windows(overlay) if hasattr(w, "_on_copy_click")][0]
+    lines = [ln for ln in chat_text(overlay).split("\n") if ln.strip()]
+    first = next(ln for ln in lines if "first" in ln)
+    cont = next(ln for ln in lines if "fourth" in ln)
+    assert first.index("first") == cont.index("fourth"), (
+        f"second column drifted on the wrapped row:\n{first!r}\n{cont!r}")
 
-    class _Evt:
-        pass
-    e = _Evt()
-    e.x, e.y = 2, cv.winfo_reqheight() - 2      # bottom-left: far from the icon
-    assert cv._on_copy_click(e) is None, "a stray click inside the table copied"
+
+def test_wide_table_stays_inside_the_window(overlay):
+    """A line that runs past the edge would force the whole transcript to scroll
+    sideways, which is worse than slightly narrower columns."""
+    overlay.root.update_idletasks()
+    overlay.add_delta("| A | B |\n| --- | --- |\n| " + "x" * 400 + " | y |\n")
+    overlay._md_finalize()
+    txt = chat_text(overlay)
+    longest = max(len(ln) for ln in txt.split("\n"))
+    assert longest < 300, f"a {longest}-char line will overflow the overlay"

@@ -162,7 +162,7 @@ def test_unclosed_bold_stays_literal(overlay):
 
 # ─── table ───────────────────────────────────────────────────────────────────
 
-def test_table_embeds_canvas(overlay):
+def test_table_renders_as_text(overlay):
     md = (
         "| Name | Score |\n"
         "| --- | --- |\n"
@@ -184,13 +184,7 @@ def test_table_body_cell_text(overlay):
     overlay.add_delta(md)
     overlay._md_finalize()
     overlay.root.update_idletasks()
-    # The canvas items contain the cell text; check via the canvas text items
-    wins = overlay.chat.window_names()
-    assert wins, "expected an embedded table canvas"
-    cv = overlay.chat.nametowidget(wins[0])
-    items_text = [cv.itemcget(i, "text") for i in cv.find_all()
-                  if cv.type(i) == "text"]
-    flat = " ".join(items_text)
+    flat = chat_text(overlay)
     assert "Hello" in flat
     assert "World" in flat
 

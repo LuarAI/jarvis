@@ -1144,6 +1144,15 @@ class Overlay:
         chat.tag_configure("md_codeblock", font=self.f_code, background=code_bg,
                                 lmargin1=self.px(20), lmargin2=self.px(20), rmargin=self.px(14),
                                 spacing1=self.px(1), spacing3=self.px(1))
+        # Tables: real text in the mono font so the columns line up (and so they can be
+        # selected and copied at all). Header tinted + the rule under it in the border
+        # colour — the shape claude.ai uses: no vertical rules, just a header underline.
+        chat.tag_configure("md_th", font=self.f_code, background=T["tool_bg"],
+                                lmargin1=self.px(20), lmargin2=self.px(20))
+        chat.tag_configure("md_td", font=self.f_code,
+                                lmargin1=self.px(20), lmargin2=self.px(20))
+        chat.tag_configure("md_trule", font=self.f_code, foreground=T["border"],
+                                lmargin1=self.px(20), lmargin2=self.px(20))
         # The selection must paint OVER the text, not under it.
         #
         # Tk resolves conflicting tag options by creation order — latest wins — and "sel"
@@ -3740,6 +3749,90 @@ class Overlay:
         out.append(self._md_strip_inline("".join(buf).strip()))
         return out
 
+    def _table_layout(self, header, body, width_chars):
+        """Lay a table out as monospace lines that fit `width_chars` columns.
+
+        Returns (lines, widths). Column widths are the natural cell widths, scaled down
+        proportionally only if the table would overflow — and long cells WRAP inside
+        their column rather than being truncated, because the point of a selectable
+        table is that what you copy is the whole value. Truncating would silently
+        corrupt anything pasted into a spreadsheet or another model.
+
+        Text, not a canvas: characters can be selected, highlighted and copied. That
+        costs the vertical rules a Canvas could draw — but claude.ai's own tables have
+        no vertical rules either, just a header underline and row separators, which is
+        exactly what this can reproduce."""
+        rows = [list(header)] + [list(r) for r in body]
+        ncol = max((len(r) for r in rows), default=1) or 1
+        rows = [[str(r[c]) if c < len(r) else "" for c in range(ncol)] for r in rows]
+
+        gap = 2                                        # spaces between columns
+        natural = [max(len(r[c]) for r in rows) for c in range(ncol)]
+        avail = max(20, width_chars - gap * (ncol - 1))
+        widths = list(natural)
+        if sum(widths) > avail:
+            # Shrink the widest columns first: a "Notes" column giving up room hurts
+            # far less than squeezing a "Qty" column to three characters.
+            floor = 6
+            while sum(widths) > avail:
+                w = max(widths)
+                if w <= floor:
+                    break                              # everything is at the floor already
+                widths[widths.index(w)] = w - 1
+        return rows, widths, gap
+
+    @staticmethod
+    def _wrap_cell(text, width):
+        """Wrap one cell to `width` columns, breaking long unbroken tokens (a URL) so a
+        single word can't blow the column out."""
+        words, line, out = str(text).split(), "", []
+        for w in words:
+            while len(w) > width:                      # a token longer than the column
+                if line:
+                    out.append(line); line = ""
+                out.append(w[:width]); w = w[width:]
+            if not line:
+                line = w
+            elif len(line) + 1 + len(w) <= width:
+                line += " " + w
+            else:
+                out.append(line); line = w
+        if line:
+            out.append(line)
+        return out or [""]
+
+    def _render_text_table(self, header, body):
+        """Insert the table as real, selectable text.
+
+        Header row tinted and underlined, thin separators between rows — the shape
+        claude.ai uses. Every character is in the Text widget, so dragging across it
+        highlights (the "sel" tag now outranks these backgrounds) and a select-all copy
+        includes it, which the drawn-canvas version never could."""
+        # how many mono characters fit the chat's current width
+        try:
+            cw = max(1, tkfont.Font(root=self.root, font=self.f_code).measure("0"))
+            usable = max(self.px(200), self.chat.winfo_width() - self.px(56))
+            width_chars = max(24, int(usable / cw))
+        except Exception:
+            width_chars = 72
+        rows, widths, gap = self._table_layout(header, body, width_chars)
+        sep = " " * gap
+        total = sum(widths) + gap * (len(widths) - 1)
+
+        def emit(cells, tags):
+            wrapped = [self._wrap_cell(c, w) for c, w in zip(cells, widths)]
+            for ln in range(max(len(w) for w in wrapped)):
+                parts = [(w[ln] if ln < len(w) else "").ljust(width)
+                         for w, width in zip(wrapped, widths)]
+                self._raw_ins(sep.join(parts).rstrip() + "\n", *tags)
+
+        self._raw_ins("\n", "a")
+        emit(rows[0], ("a", "md_th"))
+        self._raw_ins("─" * total + "\n", "a", "md_trule")
+        for r in rows[1:]:
+            emit(r, ("a", "md_td"))
+        self._raw_ins("\n", "a")
+
     def _md_flush_table(self):
         """Replace the raw rows buffered since md_tbl with a real Tk grid (or, if it wasn't a
         valid table after all, re-render them as plain lines)."""
@@ -3755,147 +3848,15 @@ class Overlay:
             try:
                 header = self._md_split_table_cells(rows[0])
                 body = [self._md_split_table_cells(r) for r in rows[2:]]
-                tbl = self._build_table(header, body)
-                self._raw_ins("\n", "a")
-                self.chat.window_create("end", window=tbl, pady=self.px(4))
+                self._render_text_table(header, body)
+                self.chat.window_create("end", window=self._copy_btn(
+                    self._table_tsv(header, body)), padx=self.px(20), pady=self.px(1))
                 self._raw_ins("\n", "a")
                 return
             except Exception:
                 pass                                  # fall through to a plain re-render
         for r in rows:
             self._md_render_block_line(r)
-
-    def _build_table(self, header, body):
-        """Render the table as a SINGLE lightweight Canvas that draws its own grid lines + cell
-        text — NOT a Frame of N Labels. A Frame-of-Labels cost ~400 ms of synchronous Tk
-        geometry management to embed/lay out each table (the "freezes when a table appears"
-        stall), and worse, an embedded child widget SWALLOWS the mouse wheel so scrolling died
-        whenever the cursor sat over a table. One Canvas lays out instantly and we forward its
-        wheel to the chat. Columns are sized by the real measured pixel width of each cell, so
-        CJK and ASCII still line up. Fonts are snapshotted at the current zoom and pinned on
-        _overlay_fonts so Tk won't GC them; _prune_chat frees the canvas with its text range."""
-        rows = [list(header)] + [list(r) for r in body]
-        ncol = max((len(r) for r in rows), default=1) or 1
-        cv = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, takefocus=0)
-        def render():
-            cv.delete("all")
-            cell_f = tkfont.Font(root=self.root, font=self.f_body)   # current zoom
-            head_f = tkfont.Font(root=self.root, font=self.f_chip)
-            cv._overlay_fonts = [cell_f, head_f]
-            padx, pady = self.px(9), self.px(5)
-            # room for the copy glyph so it can't sit on top of the last header cell's text
-            icon_w = self.px(18)
-            avail = max(self.px(200), self.chat.winfo_width() - self.px(56))
-            cap = max(self.px(90), int(avail / ncol))
-            colw = [self.px(36)] * ncol
-            for ri, r in enumerate(rows):
-                f = head_f if ri == 0 else cell_f
-                for c in range(ncol):
-                    t = r[c] if c < len(r) else ""
-                    extra = icon_w if (ri == 0 and c == ncol - 1) else 0
-                    colw[c] = max(colw[c], min(f.measure(t) + 2 * padx + extra, cap))
-            xs = [0]
-            for c in range(ncol):
-                xs.append(xs[-1] + colw[c])
-            total_w = xs[-1]
-            ys = [0]
-            for ri, r in enumerate(rows):
-                f = head_f if ri == 0 else cell_f
-                rowmax = 0
-                for c in range(ncol):
-                    t = r[c] if c < len(r) else ""
-                    reserve = icon_w if (ri == 0 and c == ncol - 1) else 0
-                    tid = cv.create_text(xs[c] + padx, ys[ri] + pady, text=t, font=f, fill=T["text"],
-                                         width=max(1, colw[c] - 2 * padx - reserve), anchor="nw")
-                    bb = cv.bbox(tid)
-                    rowmax = max(rowmax, (bb[3] - bb[1]) if bb else f.metrics("linespace"))
-                ys.append(ys[ri] + rowmax + 2 * pady)
-            total_h = ys[-1]
-            cv.configure(width=total_w, height=total_h)
-            # header tint behind the text, then thin grid lines + outer border (border colour)
-            rect = cv.create_rectangle(0, 0, total_w, ys[1], fill=T["tool_bg"], outline="")
-            cv.tag_lower(rect)
-            b = T["border"]
-            cv.create_rectangle(0, 0, total_w - 1, total_h - 1, outline=b)
-            for c in range(1, ncol):
-                cv.create_line(xs[c], 0, xs[c], total_h, fill=b)
-            for ri in range(1, len(rows)):
-                cv.create_line(0, ys[ri], total_w, ys[ri], fill=b)
-            _draw_copy(total_w, ys[1])
-
-        # ── copy affordance, drawn INSIDE the table's own canvas ──
-        #
-        # In the header row's top-right corner, where ChatGPT puts it. Drawn rather than
-        # embedded as a child widget for the same reason the table itself is drawn: an
-        # embedded widget swallows the mouse wheel and costs real layout time. Ghost-faint
-        # until hovered, so a transcript full of tables isn't a wall of icons.
-        state = {"hit": None, "copied": False}
-
-        def _draw_copy(total_w, head_h):
-            f = tkfont.Font(root=self.root, font=self.f_small)
-            cv._copy_font = f                      # keep a ref so Tk won't GC it
-            label = "✓" if state["copied"] else "⧉"
-            colour = T["accent"] if state["copied"] else (
-                T["muted"] if state["hit"] == "hover" else T["faint"])
-            pad = self.px(7)
-            x, y = total_w - pad, max(head_h / 2, self.px(9))
-            tid = cv.create_text(x, y, text=label, fill=colour, font=f, anchor="e")
-            bb = cv.bbox(tid)
-            if bb:
-                # a generous invisible hit target — the glyph itself is a few px wide
-                grow = self.px(5)
-                cv._copy_box = (bb[0] - grow, bb[1] - grow, bb[2] + grow, bb[3] + grow)
-            else:
-                cv._copy_box = None
-
-        def _in_copy(e):
-            box = getattr(cv, "_copy_box", None)
-            return bool(box and box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3])
-
-        def on_motion(e):
-            want = "hover" if _in_copy(e) else None
-            if want != state["hit"]:
-                state["hit"] = want
-                cv.configure(cursor="hand2" if want else "")
-                render()
-
-        def on_leave(_e):
-            if state["hit"] is not None:
-                state["hit"] = None
-                cv.configure(cursor="")
-                render()
-
-        def restore():
-            try:
-                state["copied"] = False
-                render()
-            except Exception:
-                pass
-
-        def on_click(e):
-            if not _in_copy(e):
-                return None                        # a click elsewhere in the table is not ours
-            try:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(self._table_tsv(header, body))
-            except Exception:
-                pass
-            state["copied"] = True
-            render()
-            try:
-                cv.after(1200, restore)
-            except Exception:
-                pass
-            return "break"
-
-        render()
-        cv.bind("<Motion>", on_motion)
-        cv.bind("<Leave>", on_leave)
-        cv.bind("<Button-1>", on_click)
-        cv._on_copy_click = on_click               # exposed for tests (withdrawn widgets eat clicks)
-        cv.bind("<MouseWheel>", self._fwd_wheel)   # don't let the table swallow the scroll
-        self._register_zoomable(cv, render)
-        return cv
 
     def _fwd_wheel(self, e):
         """Forward a wheel event that landed on an embedded widget to the chat's scroll, so
