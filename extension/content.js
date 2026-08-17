@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 5;
+  const JARVIS_CS_VERSION = 6;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -168,6 +168,51 @@
       const cap = box.querySelector("label, legend, .fb-dash-form-element__label");
       if ((hit = ok(labelText(cap)))) return hit;
     }
+    /* A slider thumb's own aria-label is only "Minimum"/"Maximum" — true but useless
+     * on its own, since it never says minimum OF WHAT. The question lives on an
+     * ancestor's aria-labelledby (Radix's usual shape). Join them so the model gets
+     * "…monthly pay rate… — Minimum" rather than two indistinguishable thumbs. */
+    if (el.getAttribute("role") === "slider") {
+      const own = (el.getAttribute("aria-label") || "").trim();
+      let grpText = "";
+      let n = el.parentElement;
+      for (let i = 0; i < 5 && n && !grpText; i++, n = n.parentElement) {
+        const ids = n.getAttribute && n.getAttribute("aria-labelledby");
+        if (ids) {
+          grpText = ids.split(/\s+/).map((id) => document.getElementById(id))
+            .filter(Boolean).map(labelText).filter(Boolean).join(" ").trim();
+        }
+      }
+      const joined = [grpText, own].filter(Boolean).join(" — ");
+      if ((hit = ok(joined))) return hit;
+    }
+    /* A <label for> whose target doesn't exist.
+     *
+     * Strider labels its skills picker <label for="mainSkills"> but the input is
+     * id="stacks-0" — there is no #mainSkills at all. The label is orphaned, so
+     * every id-based lookup misses and the PLACEHOLDER wins: the field came back
+     * called "E.g React.js" instead of "What are your main skills?". Adopt an
+     * orphaned label from the enclosing block, but only if it points at nothing —
+     * a label with a real target belongs to that target, not to us. */
+    const orphan = (l) => {
+      if (!l) return "";
+      const tgt = l.getAttribute && l.getAttribute("for");
+      if (!tgt || document.getElementById(tgt)) return "";    // it has a real owner
+      return ok(labelText(l));
+    };
+    /* Walk outward, and at each level check the PRECEDING SIBLINGS — a caption sits
+     * just before the block it describes. Deliberately not a form-wide sweep: that
+     * would let one field adopt a distant field's orphaned label. */
+    let node = el;
+    for (let up = 0; up < 4 && node && node.tagName !== "FORM" && node.tagName !== "BODY"; up++) {
+      let sib = node.previousElementSibling;
+      for (let i = 0; i < 3 && sib; i++, sib = sib.previousElementSibling) {
+        if ((hit = orphan(sib))) return hit;
+        const inner = sib.querySelector && sib.querySelector("label[for]");
+        if ((hit = orphan(inner))) return hit;
+      }
+      node = node.parentElement;
+    }
     if ((hit = ok((el.placeholder || "").trim()))) return hit;
     if ((hit = ok((el.title || "").trim()))) return hit;
     let p = el.previousElementSibling;
@@ -219,7 +264,11 @@
   const FIELD_SEL = "input,textarea,select,[contenteditable=''],[contenteditable='true']," +
     // Workday-style listboxes are BUTTONS, so they'd never be found by an
     // input/select scan — but they're fields as far as the user is concerned.
-    "[aria-haspopup='listbox'],[role='combobox']";
+    "[aria-haspopup='listbox'],[role='combobox']," +
+    // Custom sliders are <span role="slider"> (Radix, MUI, Reach). They carry a
+    // value the user must set, so they are fields — but no input/select scan finds
+    // them, which is why Strider's pay-rate slider never appeared in the list.
+    "[role='slider']";
 
   /* Shadow-root accessor.
    *
@@ -267,6 +316,10 @@
     const tag = el.tagName.toLowerCase();
     if (tag === "select") return "select";
     if (tag === "textarea") return "textarea";
+    // a slider is a value control, not text — check before contenteditable/type so a
+    // <span role="slider"> is never mistaken for something typeable
+    if (el.getAttribute("role") === "slider") return "slider";
+    if (tag === "input" && (el.type || "").toLowerCase() === "range") return "slider";
     if (el.isContentEditable) return "contenteditable";
     // a listbox-backed control (Workday) behaves like a select to the user even
     // though it's a button — say so, or the model proposes free text for it
@@ -319,6 +372,25 @@
       try {
       if (isForbidden(el)) { excluded.credentials++; continue; }
       if (!isVisible(el)) { excluded.hidden_or_honeypot++; continue; }
+      /* A combobox wrapper and the <input> inside it BOTH match the selector, so the
+       * same control was listed twice ("Which roles are you open to?" appeared as a
+       * combobox and again as a text box) — two refs for one question, and the model
+       * had no way to know they were the same. Keep the input, drop the wrapper:
+       * the input is what carries the label, the value, and the typing. */
+      if (el.getAttribute("role") === "combobox"
+          || el.getAttribute("aria-haspopup") === "listbox") {
+        if (comboInput(el) && comboInput(el) !== el) continue;
+      }
+      /* A slider's companion input. Radix renders a plain <input> beside each thumb
+       * to carry the value in form submissions; it's display:none, but a hidden
+       * control that survives the visibility check would be listed as a nameless
+       * text box and could adopt a neighbouring field's label — i.e. a second, wrong
+       * ref for a question the model already has. The thumb is the real control. */
+      if (el.tagName === "INPUT" && !el.id && !el.name
+          && (el.previousElementSibling || el.nextElementSibling)
+          && [el.previousElementSibling, el.nextElementSibling]
+               .some((n) => n && n.getAttribute
+                         && n.getAttribute("role") === "slider")) continue;
       /* A radio group is N inputs sharing a name but ONE logical question.
        * Emitting them separately would hand the model two refs ("Yes", "No") with
        * no signal that they're exclusive — so collapse them into a single field
@@ -380,6 +452,43 @@
         f.options = Array.from(el.options).slice(0, 60)
           .map((o) => ({ value: o.value, text: (o.text || "").trim() }));
         if (el.options.length > 60) f.optionsTruncated = true;
+      }
+      if (kind === "slider") {
+        /* Report the RANGE, not just the current value. Strider's pay slider runs
+         * 0..97 while the visible labels read $600..$20,000 — it's an INDEX into a
+         * non-linear scale, so a model told only "$600 to $20,000" would propose a
+         * dollar amount that means nothing to the control. Give it both: the raw
+         * bounds it must speak in, and aria-valuetext (what the user sees) so it can
+         * tell that 0 currently means $600. */
+        const s = sliderInfo(el);
+        f.min = s.min; f.max = s.max; f.step = s.step;
+        f.currentValue = String(s.now);
+        if (s.text) f.valueText = s.text;
+        /* Only flag a scale mismatch when there IS one. A native <input type=range>
+         * for "years of experience" means literally 7 years, and calling that an
+         * index would push the model toward converting a number that needs no
+         * conversion. aria-valuetext differing from aria-valuenow is the signal that
+         * the control's number isn't what the user sees. */
+        if (s.text && s.text.replace(/\s/g, "") !== String(s.now)) {
+          f.scaleNote = "the control's number is not the displayed value: "
+                      + `${s.now} currently shows as "${s.text}"`;
+        }
+      }
+      if (kind === "combobox") {
+        /* Options usually DON'T exist until the user types (they're fetched), so an
+         * empty options list here means "type to discover", not "no choices". Say
+         * which it is, so the model knows whether it can pick from a known set or is
+         * proposing a string that must be matched against a catalogue it can't see. */
+        const box = comboListbox(el);
+        const opts = box ? Array.from(box.querySelectorAll("[role='option'],li")) : [];
+        const texts = opts.map((o) => (o.textContent || "").replace(/\s+/g, " ").trim())
+          .filter(Boolean).slice(0, 60);
+        if (texts.length) f.options = texts.map((t) => ({ value: t, text: t }));
+        else f.optionsDynamic = true;          // they appear only after typing
+        // several values allowed? (chips-style pickers say so, or repeat the input)
+        const host = el.closest("[role='combobox'],[aria-haspopup='listbox']") || el;
+        if (host.getAttribute("aria-multiselectable") === "true"
+            || el.getAttribute("aria-multiselectable") === "true") f.multiple = true;
       }
       fields.push(f);
       } catch (e) { /* unreadable element — omit it rather than fail the scan */ }
@@ -692,64 +801,384 @@
    * click, wait for the listbox, match the text, click it. Returns a promise. */
   function isCombobox(el) {
     try {
-      return el.getAttribute("aria-haspopup") === "listbox"
-        || el.getAttribute("role") === "combobox"
-        || (el.tagName === "BUTTON" && !!el.getAttribute("data-automation-id"));
+      if (el.getAttribute("aria-haspopup") === "listbox") return true;
+      if (el.getAttribute("role") === "combobox") return true;
+      if (el.tagName === "BUTTON" && el.getAttribute("data-automation-id")) return true;
+      /* A type-ahead input announces itself on the INPUT… */
+      if (el.getAttribute("aria-autocomplete")) return true;
+      if (el.getAttribute("aria-controls") && el.getAttribute("aria-expanded")) return true;
+      if (el.getAttribute("aria-activedescendant") !== null) return true;
+      /* …but very often the ARIA role sits on a WRAPPER while the real control is
+       * the plain <input> inside it (Strider's "roles"/"stacks" boxes are exactly
+       * this). Reading only the input's own attributes called those plain text —
+       * so the value was typed and never committed, and the box discarded it on
+       * blur. Look one level out, but only for text-ish inputs. */
+      const t = (el.type || "text").toLowerCase();
+      if (el.tagName === "INPUT" && (t === "text" || t === "search")) {
+        const host = el.closest("[role='combobox'],[aria-haspopup='listbox']");
+        if (host && host !== el) return true;
+      }
+      return false;
     } catch (e) {
       return false;
     }
   }
 
+  /* The input you actually type into for a combobox.
+   *
+   * When the role is on a wrapper (Strider) the wrapper itself isn't typeable; the
+   * <input> inside it is. When the control is a Workday <button> there is no input
+   * at all and we drive the button. */
+  function comboInput(el) {
+    try {
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") return el;
+      return el.querySelector("input:not([type='hidden']),textarea") || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /* Where a combobox's options render. aria-controls/aria-owns name it explicitly;
+   * otherwise the popup is a sibling list inside the wrapper. */
+  function comboListbox(el) {
+    try {
+      const id = el.getAttribute("aria-controls") || el.getAttribute("aria-owns");
+      if (id) {
+        const n = document.getElementById(id);
+        if (n) return n;
+      }
+      const host = el.closest("[role='combobox'],[aria-haspopup='listbox']") || el.parentElement;
+      if (host) {
+        const n = host.querySelector("[role='listbox'],ul,ol");
+        if (n) return n;
+        // some render the popup as a sibling of the wrapper rather than a child
+        const sib = host.parentElement
+          && host.parentElement.querySelector("[role='listbox']");
+        if (sib) return sib;
+      }
+    } catch (e) { /* fall through */ }
+    return null;
+  }
+
+  /* Native <input type="range"> and ARIA sliders share one shape. Read the numbers
+   * from wherever they live: attributes for ARIA, properties for the native input. */
+  function sliderInfo(el) {
+    if (el.getAttribute("role") === "slider") {
+      const num = (a, dflt) => {
+        const v = parseFloat(el.getAttribute(a));
+        return isNaN(v) ? dflt : v;
+      };
+      return {
+        aria: true,
+        min: num("aria-valuemin", 0),
+        max: num("aria-valuemax", 100),
+        now: num("aria-valuenow", 0),
+        step: num("aria-valuestep", 1) || 1,
+        text: (el.getAttribute("aria-valuetext") || "").trim(),
+      };
+    }
+    const num = (v, dflt) => {
+      const n = parseFloat(v);
+      return isNaN(n) ? dflt : n;
+    };
+    return {
+      aria: false,
+      min: num(el.min, 0), max: num(el.max, 100),
+      now: num(el.value, 0), step: num(el.step, 1) || 1, text: "",
+    };
+  }
+
+  const OPT_SEL = "[role='option'], [data-automation-id='promptOption'], "
+                + "[data-automation-id='menuItem'], li[role='option'], li";
+
+  function optLabel(o) {
+    return (o.innerText || o.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  /* The options currently on offer, scoped to THIS combobox where possible.
+   *
+   * Scoping matters: a page with three skill pickers has three <ul>s, and a
+   * document-wide query would happily click an option belonging to a different one.
+   * Fall back to a document sweep only for popups portalled to <body> (Workday). */
+  function visibleOptions(el) {
+    let nodes = [];
+    const box = comboListbox(el);
+    try {
+      if (box) nodes = Array.from(box.querySelectorAll(OPT_SEL));
+      if (!nodes.length) nodes = Array.from(document.querySelectorAll(OPT_SEL));
+    } catch (e) { /* none */ }
+    return nodes.filter((o) => {
+      try {
+        if (!optLabel(o)) return false;
+        const r = o.getBoundingClientRect();
+        return r.height > 0 && r.width > 0;
+      } catch (e) { return false; }
+    });
+  }
+
+  /* Match a proposed string against the offered options.
+   *
+   * Ambiguity is NOT resolved by picking the first hit. "Py" matching both Python
+   * and PyTorch, or "Chía" matching four Colombian towns, is exactly the case where
+   * guessing writes a plausible wrong answer into a real application — so return the
+   * candidates and let the model choose on the next turn. */
+  function matchOption(opts, value) {
+    const want = String(value).trim().toLowerCase();
+    const exact = opts.filter((o) => optLabel(o).toLowerCase() === want);
+    if (exact.length) return { hit: exact[0] };
+    const pre = opts.filter((o) => optLabel(o).toLowerCase().startsWith(want));
+    if (pre.length === 1) return { hit: pre[0] };
+    if (pre.length > 1) return { ambiguous: pre };
+    const sub = opts.filter((o) => optLabel(o).toLowerCase().includes(want));
+    if (sub.length === 1) return { hit: sub[0] };
+    if (sub.length > 1) return { ambiguous: sub };
+    // the proposal is longer than the option ("AI Engineer (Remote)" vs "AI Engineer")
+    const rev = opts.filter((o) => optLabel(o).length > 2
+                                && want.includes(optLabel(o).toLowerCase()));
+    if (rev.length === 1) return { hit: rev[0] };
+    return {};
+  }
+
+  /* Type-ahead comboboxes: TYPE, wait, then COMMIT.
+   *
+   * The old version clicked the control and looked for options. That works for
+   * Workday (a button that opens a static menu) but not for a search box whose
+   * options don't exist until you type and the server answers — Strider's location,
+   * roles and skills fields all behave that way. Worse, when no list appeared the
+   * value stayed typed in the box and the tool reported success, so a field the user
+   * believed was filled was silently empty on submit.
+   *
+   * So: set the value natively (React ignores plain assignment), fire `input` to
+   * trigger the query, poll for options through the debounce, then click the match
+   * and VERIFY something committed. On failure, clear what we typed — leaving
+   * uncommitted text in a search box is how you submit a form with a half-typed city.
+   */
   function fillCombobox(el, value, ref) {
     return new Promise((resolve) => {
-      const want = String(value).trim().toLowerCase();
+      const input = comboInput(el);
+      const before = chipSignature(el);
+      const done = (r) => resolve(Object.assign({ ref }, r));
+
       try {
-        el.scrollIntoView({ block: "center" });
-        el.click();
+        (input || el).scrollIntoView({ block: "center" });
+        if (input) {
+          input.focus();
+          nativeSet(input, String(value));
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          // some listen for keys rather than input events
+          try {
+            input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent("keyup", { key: "a", bubbles: true }));
+          } catch (e) { /* older engines — the input event above is the main path */ }
+        } else {
+          el.click();                    // Workday-style button: opens a static menu
+        }
       } catch (e) {
-        resolve({ ref, ok: false, error: "couldn't open the list" });
+        done({ ok: false, error: "couldn't open the list: " + (e && e.message) });
         return;
       }
+
+      const giveUp = (err) => {
+        // never leave half-typed text behind: it reads as filled and submits as junk
+        if (input) {
+          try {
+            nativeSet(input, "");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.blur();
+          } catch (e) { /* best effort */ }
+        }
+        done({ ok: false, error: err });
+      };
+
       let waited = 0;
-      const OPT = "[role='option'], [data-automation-id='promptOption'], "
-                + "[data-automation-id='menuItem'], li[role='option']";
+      const STEP = 150;
+      const LIMIT = 4000;                // remote-search boxes debounce ~300ms + RTT
       const poll = () => {
-        let opts = [];
-        try { opts = Array.from(document.querySelectorAll(OPT)); } catch (e) { /* none */ }
-        const visible = opts.filter((o) => {
-          try { return o.getBoundingClientRect().height > 0; } catch (e) { return false; }
-        });
-        if (visible.length) {
-          const txt = (o) => (o.innerText || o.textContent || "").replace(/\s+/g, " ").trim();
-          const hit = visible.find((o) => txt(o).toLowerCase() === want)
-            || visible.find((o) => txt(o).toLowerCase().includes(want))
-            || visible.find((o) => want.includes(txt(o).toLowerCase()) && txt(o).length > 2);
-          if (hit) {
+        const opts = visibleOptions(el);
+        if (opts.length) {
+          const m = matchOption(opts, value);
+          if (m.hit) {
+            const text = optLabel(m.hit);
             try {
-              hit.scrollIntoView({ block: "nearest" });
-              hit.click();
-              resolve({ ref, ok: true, value: txt(hit).slice(0, 200) });
+              m.hit.scrollIntoView({ block: "nearest" });
+              m.hit.click();
             } catch (e) {
-              resolve({ ref, ok: false, error: "couldn't click the option" });
+              giveUp("couldn't click the option");
+              return;
             }
+            /* Verify the COMMIT, not the text box. A committed value shows up as a
+             * chip, a hidden input, or aria-activedescendant — and on many pickers
+             * the visible box is CLEARED on commit, so reading it back would report
+             * failure for a success (and, before this, success for a failure). */
+            setTimeout(() => {
+              const after = chipSignature(el);
+              const boxText = input ? String(input.value || "").trim() : "";
+              const committed = after !== before
+                || boxText.toLowerCase() === text.toLowerCase()
+                || (!!input && boxText === "" && !!before !== !!after);
+              if (committed || !input) done({ ok: true, value: text.slice(0, 200) });
+              else done({ ok: false, error: `clicked "${text}" but the field didn't `
+                                          + "record it — it may need to be picked by hand" });
+            }, 250);
             return;
           }
-          if (waited >= 1500) {           // list is open but nothing matches
-            try { el.click(); } catch (e) { /* leave it */ }   // close it again
-            resolve({ ref, ok: false,
-                      error: `no option matching "${value}" (saw: ` +
-                             visible.slice(0, 4).map(txt).join(", ") + ")" });
+          if (m.ambiguous) {
+            giveUp(`"${value}" matches ${m.ambiguous.length} options — say which: `
+                   + m.ambiguous.slice(0, 8).map(optLabel).join(" | "));
+            return;
+          }
+          if (waited >= 1200) {          // list is open and settled, nothing matches
+            giveUp(`no option matching "${value}" (offered: `
+                   + opts.slice(0, 6).map(optLabel).join(" | ") + ")");
             return;
           }
         }
-        if (waited >= 3000) {
-          resolve({ ref, ok: false, error: "the option list never opened" });
+        if (waited >= LIMIT) {
+          giveUp(opts.length ? `no option matching "${value}"`
+                             : "the option list never appeared (the site may still be "
+                               + "searching, or this control needs a real click)");
           return;
         }
-        waited += 150;
-        setTimeout(poll, 150);
+        waited += STEP;
+        setTimeout(poll, STEP);
       };
       setTimeout(poll, 200);
+    });
+  }
+
+  /* A cheap fingerprint of what this control has COMMITTED — chips, selected
+   * options, the hidden input a picker writes to. Compared before/after so a commit
+   * can be confirmed rather than assumed. */
+  function chipSignature(el) {
+    try {
+      /* Scope: the block that owns this control, not just its immediate parent.
+       * Pickers render the committed chip as a SIBLING of the input's wrapper (or
+       * further out), so a tight scope saw no chip and reported a successful commit
+       * as a failure. Two levels up covers the common shapes without straying into
+       * a neighbouring field. */
+      const host = el.closest("[role='combobox'],[aria-haspopup='listbox']") || el;
+      /* Climb to the block that holds the whole field. When the role sits on a
+       * wrapper, that wrapper's parent is usually it; when there's no wrapper at all
+       * (a bare type-ahead input), the input is `host` and we must climb further, or
+       * the scope sits BELOW where the chip renders and a real commit reads as a
+       * failure. Stop at the form so a neighbouring field's chips never count. */
+      let scope = host;
+      for (let i = 0; i < 3; i++) {
+        const up = scope.parentElement;
+        if (!up || up.tagName === "FORM" || up.tagName === "BODY") break;
+        scope = up;
+      }
+      const parts = [];
+      const sel = scope.querySelectorAll(
+        "[role='option'][aria-selected='true'], [data-chip], [class*='chip'], "
+        + "[class*='tag'], [class*='pill'], input[type='hidden']");
+      for (const n of Array.from(sel).slice(0, 20)) {
+        parts.push(n.tagName === "INPUT" ? String(n.value || "")
+                                         : (n.textContent || "").trim());
+      }
+      const ad = el.getAttribute("aria-activedescendant");
+      if (ad) parts.push("ad:" + ad);
+      return parts.join("|");
+    } catch (e) {
+      return "";
+    }
+  }
+
+  /* Set a slider by pressing keys, not by dragging.
+   *
+   * Every slider that meets the ARIA pattern implements Home/End/arrows, and Radix
+   * (Strider's) reads event.key off a bubbling keydown — so dispatched keys work.
+   * Pointer dragging would need geometry AND a linear scale, and this scale is not
+   * linear: the control runs 0..97 while the labels read $600..$20,000. One
+   * ArrowRight is exactly one step whatever the curve, so stepping lands where the
+   * user asked; pixel math would not.
+   *
+   * Home first, then N steps, so the starting position can't matter.
+   */
+  function fillSlider(el, value, ref) {
+    return new Promise((resolve) => {
+      const s = sliderInfo(el);
+      const target = Number(String(value).replace(/[$,\s]/g, ""));
+      if (isNaN(target)) {
+        resolve({ ref, ok: false,
+                  error: `"${value}" isn't a number; this slider takes ${s.min}..${s.max}` });
+        return;
+      }
+      const clamped = Math.max(s.min, Math.min(s.max, target));
+
+      if (!s.aria) {                        // native <input type="range">: assignable
+        try {
+          nativeSet(el, String(clamped));
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        } catch (e) {
+          resolve({ ref, ok: false, error: String(e && e.message || e) });
+          return;
+        }
+        const now = sliderInfo(el).now;
+        resolve({ ref, ok: true, value: String(now),
+                  note: now !== target ? `landed on ${now} (asked ${target})` : undefined });
+        return;
+      }
+
+      const key = (name) => {
+        const init = { key: name, code: name, bubbles: true, cancelable: true };
+        el.dispatchEvent(new KeyboardEvent("keydown", init));
+        el.dispatchEvent(new KeyboardEvent("keyup", init));
+      };
+      try {
+        el.scrollIntoView({ block: "center" });
+        el.focus();
+        key("Home");                        // known state, so steps are absolute
+      } catch (e) {
+        resolve({ ref, ok: false, error: "couldn't focus the slider" });
+        return;
+      }
+
+      /* Step toward the target, re-reading aria-valuenow each time. Bounded, and it
+       * stops early if the value stops moving — a slider that ignores keys must be
+       * reported, not hammered 200 times. */
+      const step = s.step || 1;
+      let guard = 0;
+      const MAX_STEPS = 400;
+      let stalls = 0;
+      const advance = () => {
+        const now = sliderInfo(el).now;
+        if (Math.abs(now - clamped) < step / 2 || guard >= MAX_STEPS) {
+          finish(now);
+          return;
+        }
+        const before = now;
+        key(now < clamped ? "ArrowRight" : "ArrowLeft");
+        guard++;
+        const after = sliderInfo(el).now;
+        if (after === before) {
+          stalls++;
+          if (stalls >= 3) { finish(after); return; }   // keys ignored, or at a bound
+        } else {
+          stalls = 0;
+        }
+        // yield occasionally so a React re-render can land between steps
+        if (guard % 20 === 0) setTimeout(advance, 0);
+        else advance();
+      };
+      const finish = (now) => {
+        const info = sliderInfo(el);
+        const shown = info.text ? ` (${info.text})` : "";
+        if (Math.abs(now - clamped) > step) {
+          resolve({ ref, ok: false,
+                    error: `couldn't move the slider to ${clamped}; it stopped at `
+                           + `${now}${shown}` });
+          return;
+        }
+        /* Report where it LANDED, never what was asked. Sliders snap, and a snapped
+         * salary floor reported as the requested number is a wrong number in a real
+         * application. */
+        resolve({ ref, ok: true, value: String(now) + shown,
+                  note: now !== target
+                    ? `landed on ${now}${shown}; you asked for ${target}` : undefined });
+      };
+      advance();
     });
   }
 
@@ -812,6 +1241,14 @@
       highlight(el, "pending");
       el.scrollIntoView({ block: "center", behavior: "smooth" });
       const kind = kindOf(el);
+      // Sliders take keys, not text. Async because stepping yields to let the
+      // component re-render between presses.
+      if (kind === "slider") {
+        return fillSlider(el, value, ref).then((r) => {
+          highlight(el, r.ok ? "filled" : null);
+          return r;
+        });
+      }
       // Workday and friends: not a <select>, so it must be opened and clicked.
       // Returns a promise — the caller awaits it.
       if (kind !== "select" && isCombobox(el)) {
@@ -870,6 +1307,26 @@
         nativeSet(el, String(value));
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
+        /* Some type-ahead boxes are structurally INVISIBLE as such: Strider's
+         * "Where do you live?" is a bare <input name="query"> with no role, no
+         * aria-autocomplete and no list in the DOM until you type. Nothing at scan
+         * time can tell it from a plain text field — so detect it here, after
+         * typing: if a suggestion list appeared, this was a picker all along, and
+         * leaving the raw text uncommitted would submit a city the site never
+         * accepted. Hand off to the commit path. */
+        if (el.tagName === "INPUT" && !el.getAttribute("list")) {
+          return new Promise((res) => setTimeout(res, 400)).then(() => {
+            if (!visibleOptions(el).length) {
+              el.blur();
+              highlight(el, "filled");
+              return { ref, ok: true, value: String(el.value || "").slice(0, 200) };
+            }
+            return fillCombobox(el, value, ref).then((r) => {
+              highlight(el, r.ok ? "filled" : null);
+              return r;
+            });
+          });
+        }
       }
       el.blur();                                     // many form libs validate on blur
       highlight(el, "filled");

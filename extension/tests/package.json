@@ -1,0 +1,11 @@
+{
+  "name": "jarvis-extension-tests",
+  "private": true,
+  "description": "jsdom harnesses for extension/content.js — run via `npm test` or the Python suite (app/tests/test_extension_js.py).",
+  "scripts": {
+    "test": "for f in *.test.js; do node \"$f\" || exit 1; done"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

@@ -58,6 +58,29 @@ def _fmt_fields(fields):
             d["UNLABELLED"] = "ask the user what this field is — do not guess"
         elif d.get("labelSource") == "nearby-text":
             d["labelUncertain"] = "label inferred from nearby text; confirm if it matters"
+        # A slider takes the NUMBER the control uses, which is often an index rather
+        # than the quantity shown on screen (Strider's pay slider runs 0..97 while the
+        # page reads $600..$20,000). Proposing "5000" there would silently clamp to the
+        # top, so say plainly what the accepted range is.
+        if d.get("kind") == "slider":
+            d["howToFill"] = (
+                f"propose a NUMBER between {d.get('min')} and {d.get('max')}"
+                + (f" (step {d['step']})" if d.get("step") not in (None, 1) else "")
+                + ". This is the control's own scale. If a scaleNote is present the "
+                  "number is NOT the value shown on screen (e.g. 0..97 displaying as "
+                  "$600..$20,000) — do not propose the displayed amount; work out the "
+                  "position on the control's scale, or ask the user. The result "
+                  "reports where it actually landed, since sliders snap."
+            )
+        # An empty option list on a combobox means "options load as you type", NOT
+        # "no choices" — the model must propose a string to search for and be ready
+        # for it to come back ambiguous or unmatched.
+        if d.get("kind") == "combobox" and d.get("optionsDynamic"):
+            d["howToFill"] = (
+                "type-ahead: options only appear after typing, so propose the text to "
+                "search for. If it matches several, the fill is refused and lists them "
+                "— pick one and retry. Nothing is committed unless an option is chosen."
+            )
         out.append(d)
     return json.dumps(out, ensure_ascii=False, indent=1)
 
