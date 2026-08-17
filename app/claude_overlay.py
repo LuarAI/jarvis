@@ -254,6 +254,7 @@ class ChatView:
         self._md_tail = ""
         self._md_tbl = None
         self._md_fence = False
+        self._md_code = None            # lines of the fenced block being collected, for its Copy button
         self._md_last_scroll = 0.0
         self._turn_raw = ""
         self._turn_copy_added = False
@@ -1143,6 +1144,15 @@ class Overlay:
         chat.tag_configure("md_codeblock", font=self.f_code, background=code_bg,
                                 lmargin1=self.px(20), lmargin2=self.px(20), rmargin=self.px(14),
                                 spacing1=self.px(1), spacing3=self.px(1))
+        # The selection must paint OVER the text, not under it.
+        #
+        # Tk resolves conflicting tag options by creation order — latest wins — and "sel"
+        # is built into the widget, so it predates every tag above. Each one that sets a
+        # background (md_code, md_codeblock, tool, user) therefore outranked it, and
+        # dragging across a code span or your own message hid the highlight behind the
+        # block's own tint: the text looked unselected even though it was selected.
+        # Raising "sel" to the top puts it back in front of all of them at once.
+        chat.tag_raise("sel")
 
     # ── custom scrollbar (right edge of the chat) ──
     def _sb_set(self, first, last):
@@ -3556,8 +3566,14 @@ class Overlay:
         and render it permanently."""
         if line.lstrip().startswith("```"):
             self._md_fence = not self._md_fence     # the fence line itself is not rendered
+            if self._md_fence:
+                self._md_code = []                  # opening fence → start collecting
+            else:
+                self._md_flush_code()               # closing fence → offer the block for copy
             return
         if self._md_fence:
+            if self._md_code is not None:
+                self._md_code.append(line)
             self._raw_ins(line + ("\n" if trailing_nl else ""), "a", "md_codeblock")
             return
         if self._md_is_table_row(line):
@@ -3571,6 +3587,26 @@ class Overlay:
         if self._md_tbl is not None:                # a non-table line ends the table block
             self._md_flush_table()
         self._md_render_block_line(line, trailing_nl)
+
+    def _md_flush_code(self):
+        """A fenced block just closed — drop a Copy button under it.
+
+        The text handed over is the block's CONTENTS, without the ``` fences: the user
+        asked for the code itself, which is what pastes into an editor or another chat.
+        The fence lines were never rendered anyway, so this matches what's on screen.
+        Whitespace-only blocks get no button (nothing worth copying)."""
+        lines = self._md_code or []
+        self._md_code = None
+        body = "\n".join(lines).strip("\n")
+        if not body.strip():
+            return
+        try:
+            self._raw_ins("\n", "a")
+            self.chat.window_create("end", window=self._copy_btn(body),
+                                    padx=self.px(20), pady=self.px(1))
+            self._raw_ins("\n", "a")
+        except Exception:
+            pass                                    # a missing button must never break the reply
 
     def _md_render_block_line(self, line, trailing_nl=True):
         nl = "\n" if trailing_nl else ""
@@ -3654,6 +3690,26 @@ class Overlay:
         return bool(t) and set(t) <= set("-: |") and "-" in t
 
     @staticmethod
+    def _table_tsv(header, body):
+        """The table as TAB-separated text — what a copy of it puts on the clipboard.
+
+        Tabs, not the markdown pipes the model actually wrote. Both are readable to an
+        LLM, but only TSV also pastes into Sheets/Excel as real columns (spreadsheets
+        split on tabs and nothing else; a pipe table lands entirely in column A). It's
+        what ChatGPT's own table copy produces, so pasting from Jarvis behaves the way
+        the user already expects. Tabs and newlines inside a cell would corrupt the
+        column structure, so they collapse to spaces."""
+        def cell(s):
+            return re.sub(r"[\t\r\n]+", " ", str(s)).strip()
+        rows = [list(header)] + [list(r) for r in body]
+        ncol = max((len(r) for r in rows), default=1) or 1
+        out = []
+        for r in rows:
+            padded = [cell(r[c]) if c < len(r) else "" for c in range(ncol)]
+            out.append("\t".join(padded))
+        return "\n".join(out)
+
+    @staticmethod
     def _md_strip_inline(text):
         """Table cells are plain Labels (no partial styling), so drop emphasis/code markers
         instead of showing them raw."""
@@ -3727,6 +3783,8 @@ class Overlay:
             head_f = tkfont.Font(root=self.root, font=self.f_chip)
             cv._overlay_fonts = [cell_f, head_f]
             padx, pady = self.px(9), self.px(5)
+            # room for the copy glyph so it can't sit on top of the last header cell's text
+            icon_w = self.px(18)
             avail = max(self.px(200), self.chat.winfo_width() - self.px(56))
             cap = max(self.px(90), int(avail / ncol))
             colw = [self.px(36)] * ncol
@@ -3734,7 +3792,8 @@ class Overlay:
                 f = head_f if ri == 0 else cell_f
                 for c in range(ncol):
                     t = r[c] if c < len(r) else ""
-                    colw[c] = max(colw[c], min(f.measure(t) + 2 * padx, cap))
+                    extra = icon_w if (ri == 0 and c == ncol - 1) else 0
+                    colw[c] = max(colw[c], min(f.measure(t) + 2 * padx + extra, cap))
             xs = [0]
             for c in range(ncol):
                 xs.append(xs[-1] + colw[c])
@@ -3745,8 +3804,9 @@ class Overlay:
                 rowmax = 0
                 for c in range(ncol):
                     t = r[c] if c < len(r) else ""
+                    reserve = icon_w if (ri == 0 and c == ncol - 1) else 0
                     tid = cv.create_text(xs[c] + padx, ys[ri] + pady, text=t, font=f, fill=T["text"],
-                                         width=max(1, colw[c] - 2 * padx), anchor="nw")
+                                         width=max(1, colw[c] - 2 * padx - reserve), anchor="nw")
                     bb = cv.bbox(tid)
                     rowmax = max(rowmax, (bb[3] - bb[1]) if bb else f.metrics("linespace"))
                 ys.append(ys[ri] + rowmax + 2 * pady)
@@ -3761,7 +3821,78 @@ class Overlay:
                 cv.create_line(xs[c], 0, xs[c], total_h, fill=b)
             for ri in range(1, len(rows)):
                 cv.create_line(0, ys[ri], total_w, ys[ri], fill=b)
+            _draw_copy(total_w, ys[1])
+
+        # ── copy affordance, drawn INSIDE the table's own canvas ──
+        #
+        # In the header row's top-right corner, where ChatGPT puts it. Drawn rather than
+        # embedded as a child widget for the same reason the table itself is drawn: an
+        # embedded widget swallows the mouse wheel and costs real layout time. Ghost-faint
+        # until hovered, so a transcript full of tables isn't a wall of icons.
+        state = {"hit": None, "copied": False}
+
+        def _draw_copy(total_w, head_h):
+            f = tkfont.Font(root=self.root, font=self.f_small)
+            cv._copy_font = f                      # keep a ref so Tk won't GC it
+            label = "✓" if state["copied"] else "⧉"
+            colour = T["accent"] if state["copied"] else (
+                T["muted"] if state["hit"] == "hover" else T["faint"])
+            pad = self.px(7)
+            x, y = total_w - pad, max(head_h / 2, self.px(9))
+            tid = cv.create_text(x, y, text=label, fill=colour, font=f, anchor="e")
+            bb = cv.bbox(tid)
+            if bb:
+                # a generous invisible hit target — the glyph itself is a few px wide
+                grow = self.px(5)
+                cv._copy_box = (bb[0] - grow, bb[1] - grow, bb[2] + grow, bb[3] + grow)
+            else:
+                cv._copy_box = None
+
+        def _in_copy(e):
+            box = getattr(cv, "_copy_box", None)
+            return bool(box and box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3])
+
+        def on_motion(e):
+            want = "hover" if _in_copy(e) else None
+            if want != state["hit"]:
+                state["hit"] = want
+                cv.configure(cursor="hand2" if want else "")
+                render()
+
+        def on_leave(_e):
+            if state["hit"] is not None:
+                state["hit"] = None
+                cv.configure(cursor="")
+                render()
+
+        def restore():
+            try:
+                state["copied"] = False
+                render()
+            except Exception:
+                pass
+
+        def on_click(e):
+            if not _in_copy(e):
+                return None                        # a click elsewhere in the table is not ours
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(self._table_tsv(header, body))
+            except Exception:
+                pass
+            state["copied"] = True
+            render()
+            try:
+                cv.after(1200, restore)
+            except Exception:
+                pass
+            return "break"
+
         render()
+        cv.bind("<Motion>", on_motion)
+        cv.bind("<Leave>", on_leave)
+        cv.bind("<Button-1>", on_click)
+        cv._on_copy_click = on_click               # exposed for tests (withdrawn widgets eat clicks)
         cv.bind("<MouseWheel>", self._fwd_wheel)   # don't let the table swallow the scroll
         self._register_zoomable(cv, render)
         return cv
@@ -3800,12 +3931,21 @@ class Overlay:
             self._md_autoscroll_final()       # giant-line throttling may have left us off-bottom
         except Exception:
             pass
+        # An unterminated fence (the reply ended mid-block) still deserves its button:
+        # the text is on screen and copying it is exactly what the user wants.
+        if self._md_fence and self._md_code:
+            try:
+                self._md_flush_code()
+            except Exception:
+                pass
+        self._md_code = None
         self._md_fence = False
         self._md_seal_mark()
 
     def _md_reset(self):
         """Drop md state without committing (the caller has wiped the chat)."""
         self._md_tail = ""
+        self._md_code = None
         self._md_tbl = None
         self._md_fence = False
         self._md_seal_mark()
@@ -3894,6 +4034,7 @@ class Overlay:
         idle, done = "⧉ Copy", "✓ Copied"
         c = tk.Canvas(self.chat, bg=T["bg"], highlightthickness=0, cursor="hand2", takefocus=0)
         c._copied = False
+        c._copy_text = text                 # what this button will copy (asserted by tests)
         st = {"f": None, "w": 0, "h": 0, "rad": 0}   # current-zoom font + box, refreshed by render()
 
         def draw(label, fg, bg=None):
@@ -5665,7 +5806,7 @@ class Overlay:
 # _poll while a background chat's events are being drained, and inside _run_as.
 _CHAT_FIELDS = (
     "busy", "read_only", "_model", "_ctx_pct", "_claude_header", "_thinking_active",
-    "_md_tail", "_md_tbl", "_md_fence", "_md_last_scroll", "_turn_raw",
+    "_md_tail", "_md_tbl", "_md_fence", "_md_code", "_md_last_scroll", "_turn_raw",
     "_turn_copy_added", "_session_id", "_discard_pending",
     "_compacting", "_compact_line", "_compact_anim_after", "_compact_t0",
     "_compact_frame", "_zoomables", "_sb_first", "_sb_last", "_sb_drag", "_sb_hover",
