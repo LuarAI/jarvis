@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 9;
+  const JARVIS_CS_VERSION = 10;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -439,7 +439,31 @@
        * no signal that they're exclusive — so collapse them into a single field
        * shaped exactly like a <select>, options and all, and remember every member
        * so the fill can click the right one. */
-      if ((el.type || "").toLowerCase() === "radio") {
+      /* Group by SHARED NAME, not by input type.
+       *
+       * A set of inputs sharing one `name` is one logical question — that is what the
+       * name attribute means. Keying on type="radio" missed LinkedIn's other
+       * rendering of the very same question: type="checkbox" inputs with a shared
+       * name inside a fieldset. Those fell through to the per-input path and produced
+       * TWO top-level fields per question, identical label, identical nameAttr, no
+       * options — nothing to tell Yes from No, so nothing could be answered.
+       *
+       * A lone checkbox (terms & conditions) has no group and is NOT swept up here:
+       * it needs a name shared with a sibling, inside a common group container. */
+      const elType = (el.type || "").toLowerCase();
+      let grouped = elType === "radio";
+      if (!grouped && elType === "checkbox" && el.name) {
+        try {
+          const scope = el.closest("fieldset, [role='radiogroup'], [data-test-form-element], "
+                                   + ".fb-dash-form-element") || el.form;
+          if (scope) {
+            const sameName = scope.querySelectorAll(
+              `input[type="checkbox"][name="${CSS.escape(el.name)}"]`);
+            grouped = sameName.length > 1;    // 2+ boxes, one name → one question
+          }
+        } catch (e) { grouped = false; }      // exotic name → treat as a plain checkbox
+      }
+      if (grouped) {
         const key = (el.form ? "f" : "") + (el.name || groupLabel(el) || "radio");
         let g = radioGroups.get(key);
         if (!g) {
@@ -1433,6 +1457,29 @@
       if (!pick.checked) {
         return { ref, ok: false, error: "the option didn't select (the form ignored it)" };
       }
+      /* Checkbox-rendered single-selects don't deselect their siblings the way radios
+       * do, so a second answer would leave BOTH ticked — an invalid state the form
+       * may reject or, worse, submit. Clear the others by clicking them, so the page
+       * sees a real user action rather than a silent property write. */
+      if ((pick.type || "").toLowerCase() === "checkbox") {
+        for (const other of live) {
+          if (other === pick || !other.checked) continue;
+          try {
+            other.click();
+            if (other.checked) {
+              const lab = labelElementFor(other.id);
+              if (lab) lab.click();
+            }
+          } catch (e) { /* best effort — reported below if it stuck */ }
+        }
+        const extra = live.filter((n) => n !== pick && n.checked);
+        if (extra.length) {
+          return { ref, ok: false,
+                   error: `selected "${optionText(pick)}" but could not clear `
+                          + extra.map(optionText).join(", ")
+                          + " — this question now has more than one answer, fix it by hand" };
+        }
+      }
       highlight(pick, "filled");
       return { ref, ok: true, value: optionText(pick) || pick.value || "" };
     }
@@ -1665,7 +1712,11 @@
           "fieldset[data-test-form-builder-radio-button-form-component], "
           + "fieldset, [role='radiogroup']");
         for (const g of Array.from(groups).slice(0, 6)) {
-          const radios = Array.from(g.querySelectorAll("input[type='radio']")).slice(0, 6);
+          // Radios AND checkboxes: LinkedIn renders the same single-select question
+          // both ways, and the checkbox variant is exactly where this probe is most
+          // needed — it was blind to it.
+          const radios = Array.from(g.querySelectorAll(
+            "input[type='radio'], input[type='checkbox']")).slice(0, 6);
           if (!radios.length) continue;
           out.push({
             groupTag: g.tagName,
@@ -1689,6 +1740,9 @@
                 scanRaw: scan ? (scan.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40) : null,
                 wrappingLabel: !!wrap,
                 dataTestAttr: dataAttr.slice(0, 40),
+                type: (el.type || "").toLowerCase(),
+                nameAttr: (el.name || "").slice(-42),
+                checked: !!el.checked,
                 optionTextResult: optionText(el).slice(0, 40),
                 inShadow: !!(el.getRootNode && el.getRootNode() !== document),
               };

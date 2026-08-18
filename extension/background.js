@@ -194,6 +194,21 @@ async function askFrames(tabId, msg) {
     return { results };
   }
 
+  if (msg.action === "probe_options") {
+    /* Pass the probe's own reply through instead of running it into the field merge,
+     * which only understands fields/page_text — that merge is why url and detail came
+     * back empty from a diagnostic whose entire job is to report them. Prefer the
+     * frame that actually found groups; keep every frame's URL so an iframe form is
+     * identifiable. */
+    const best = live.find(({ r }) => (r.detail || []).length) || live[0];
+    return Object.assign({}, best ? best.r : {}, {
+      frames: live.map(({ frameId, r }) => ({
+        frameId, url: (frameUrl[frameId] || r.url || "?").slice(0, 90),
+        groups: (r.detail || []).length, csVersion: r.csVersion || null,
+      })),
+    });
+  }
+
   if (msg.action === "show_me" || msg.action === "clear_show_me") {
     // Every frame is asked; each marks the items it owns. Merge what was shown.
     const shown = [];
