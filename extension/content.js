@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 12;
+  const JARVIS_CS_VERSION = 13;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -1272,6 +1272,19 @@
       try {
         (input || el).scrollIntoView({ block: "center" });
         if (input) {
+          /* OPEN the control first.
+           *
+           * Typing alone is enough for a search-as-you-type box, but plenty of
+           * pickers render their menu only on click and ignore keystrokes while
+           * closed — Recruiterflow's rating dropdowns are exactly that, and every
+           * attempt died with "the option list never appeared". Clicking the visible
+           * control (not the hidden input) is what a user does, and it is harmless
+           * for a type-ahead that was already open. */
+          let control = input.parentElement;
+          const declared = input.parentElement
+            && input.parentElement.closest("[role='combobox'],[aria-haspopup='listbox']");
+          if (declared) control = declared;      // the WRAPPER, never the input itself
+          try { if (control && control !== input) control.click(); } catch (e) { /* keep going */ }
           input.focus();
           nativeSet(input, String(value));
           input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1312,6 +1325,15 @@
             try {
               m.hit.scrollIntoView({ block: "nearest" });
               m.hit.click();
+              /* Some menus are lists of CHECKBOXES, and clicking the row's text does
+               * not necessarily tick the box — "clicked 'USD' but the field didn't
+               * record it". If the row owns a checkbox that is still unticked, click
+               * the box itself, which is what the widget actually reads. */
+              const box = m.hit.querySelector
+                && m.hit.querySelector("input[type='checkbox'],input[type='radio']");
+              if (box && !box.checked) {
+                try { box.click(); } catch (e) { /* verified below either way */ }
+              }
             } catch (e) {
               giveUp("couldn't click the option");
               return;
@@ -1323,7 +1345,25 @@
             setTimeout(() => {
               const after = chipSignature(el);
               const boxText = input ? String(input.value || "").trim() : "";
-              const committed = after !== before
+              /* A ticked checkbox/radio in the chosen row IS the commit for a
+               * checkbox-menu picker — its state is what the widget reads, and no
+               * chip or input value ever appears. */
+              let ticked = false;
+              try {
+                const box = m.hit.querySelector
+                  && m.hit.querySelector("input[type='checkbox'],input[type='radio']");
+                ticked = !!(box && box.checked);
+              } catch (e) { /* not that kind of menu */ }
+              // the control's own rendered text is also evidence (the placeholder is
+              // replaced by the selection on most pickers)
+              let shown = false;
+              try {
+                const host = el.closest("[role='combobox'],[aria-haspopup='listbox']")
+                          || (input && input.parentElement);
+                shown = !!(host && (host.innerText || "").toLowerCase()
+                                     .includes(text.toLowerCase()));
+              } catch (e) { /* best effort */ }
+              const committed = ticked || shown || after !== before
                 || boxText.toLowerCase() === text.toLowerCase()
                 || (!!input && boxText === "" && !!before !== !!after);
               if (committed || !input) done({ ok: true, value: text.slice(0, 200) });
