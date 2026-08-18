@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 11;
+  const JARVIS_CS_VERSION = 12;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -106,7 +106,14 @@
   /* Strings that look like a label but aren't — accepting one is worse than
    * finding nothing, because it silently reads as a real question. LinkedIn's
    * radio groups put a visually-hidden "Required" span inside the <legend>. */
-  const LABEL_NOISE = /^(required|optional|\*|select an option|choose|please select|yes|no)$/i;
+  /* Strings that look like a caption but are the control's own placeholder text.
+   * react-select renders "Click to view options" as a DIV inside the control, which
+   * sits between the input and the real question — so a caption walk picks it up and
+   * every dropdown ends up named after its placeholder instead of what it asks. */
+  const LABEL_NOISE = new RegExp(
+    "^(required|optional|\\*|select an option|choose|please select|yes|no"
+    + "|click to view options|select\\.{3}|select|search|type to search"
+    + "|start typing|none|n/?a|--+)$", "i");
 
   /* Read an element's text INCLUDING visually-hidden parts.
    *
@@ -213,13 +220,41 @@
       }
       node = node.parentElement;
     }
+    /* The caption ABOVE the control, found by climbing to the field's wrapper.
+     *
+     * react-select (Recruiterflow, Greenhouse, countless others) buries the real
+     * <input> several divs inside its own chrome and gives it no accessible name at
+     * all. The question is a sibling of an ANCESTOR, and it is usually a <p> or
+     * <div>, not a <label> — so neither the sibling walk from the input nor the
+     * orphaned-label climb above could ever see it. Six such questions came back
+     * UNLABELLED on one form and simply could not be answered.
+     *
+     * Climb, and at each level check the preceding siblings for caption-ish text.
+     * Deliberately BEFORE the placeholder fallback: "Enter amount" is what the box
+     * says, "What are your monthly salary expectations in USD?" is what it asks. */
+    const CAPTION = "label,p,legend,h1,h2,h3,h4,h5,h6,div,span";
+    const caption = (n) => {
+      if (!n || !n.matches) return "";
+      // A node that CONTAINS a form control is a field, not a caption for one.
+      try { if (n.querySelector("input,select,textarea,[role='combobox']")) return ""; }
+      catch (e) { /* treat as caption-able */ }
+      if (!n.matches(CAPTION)) return "";
+      const t = labelText(n);
+      return (t && t.length <= 200) ? ok(t) : "";
+    };
+    let wrap = el;
+    for (let up = 0; up < 5 && wrap && wrap.tagName !== "FORM" && wrap.tagName !== "BODY"; up++) {
+      let sib = wrap.previousElementSibling;
+      for (let i = 0; i < 3 && sib; i++, sib = sib.previousElementSibling) {
+        if ((hit = caption(sib))) return hit;
+        // the caption may be wrapped one level deep (<div><p>Question</p></div>)
+        const inner = sib.querySelector && sib.querySelector(CAPTION);
+        if ((hit = caption(inner))) return hit;
+      }
+      wrap = wrap.parentElement;
+    }
     if ((hit = ok((el.placeholder || "").trim()))) return hit;
     if ((hit = ok((el.title || "").trim()))) return hit;
-    let p = el.previousElementSibling;
-    for (let i = 0; i < 3 && p; i++, p = p.previousElementSibling) {
-      const t = labelText(p);
-      if (t && t.length <= 200 && (hit = ok(t))) return hit;
-    }
     const auto = el.getAttribute("data-automation-id");   // Workday convention
     if (auto) return auto.replace(/[-_]/g, " ").trim();
     return "";                        // NOT the id: an unlabelled field must say so
