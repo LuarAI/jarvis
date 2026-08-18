@@ -153,6 +153,25 @@ def build_tools(bridge, propose_fill):
         return {"content": [{"type": "text",
                              "text": f"{len(fields)} fillable field(s):\n{_fmt_fields(fields)}"}]}
 
+    @tool("browser_probe_options",
+          "Diagnostic: why did a multiple-choice question's options come back "
+          "unreadable? Reports, for each radio input on the page, its id, whether a "
+          "<label for> was found by each lookup route, the label's raw text, whether "
+          "the input sits in a shadow root, and what the option-text resolver actually "
+          "returned. Use it when options look like ids/UUIDs instead of words — it "
+          "shows which step failed instead of guessing. Read-only.",
+          {"type": "object", "properties": {}})
+    async def probe_options(args):
+        res = bridge.request("probe_options")
+        if res.get("error") or not res.get("ok"):
+            return {"content": [{"type": "text",
+                                 "text": f"Probe failed: {res.get('error') or 'unknown error'}"}]}
+        return {"content": [{"type": "text",
+                             "text": "Radio option probe:\n"
+                                     + json.dumps({k: res.get(k) for k in
+                                                   ("csVersion", "url", "radioGroups", "detail")},
+                                                  ensure_ascii=False, indent=1)[:6000]}]}
+
     @tool("browser_show_me",
           "Point AT things on the page so the user can see where they are: draws a "
           "numbered ring around each one, in the page itself, which follows the "
@@ -255,7 +274,7 @@ def build_tools(bridge, propose_fill):
         status = propose_fill(fills)
         return {"content": [{"type": "text", "text": status}]}
 
-    return [read_page, list_fields, show_me, fill_form]
+    return [read_page, list_fields, show_me, probe_options, fill_form]
 
 
 def build_server(bridge, propose_fill):

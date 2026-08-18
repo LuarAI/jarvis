@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 6;
+  const JARVIS_CS_VERSION = 7;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -795,6 +795,170 @@
     else el.removeAttribute("data-jarvis-hl");
   }
 
+  /* ── "show me where": point at things on the page ──────────────────────────
+   *
+   * Drawn IN THE PAGE, not on a screen overlay. That's the whole design decision:
+   * a marker anchored to the element moves with it for free — scroll, resize,
+   * reflow — whereas a screen overlay would have to poll and re-project, and would
+   * still smear during smooth scrolling. It also means no screenshot is taken and
+   * nothing leaves the machine.
+   *
+   * Two shapes, because the accuracy differs sharply:
+   *   - element: a ring around one control ("the Submit button")
+   *   - region : a labelled box around an area ("this strip is the tool palette")
+   * Regions are what a model is reliable at, so the tool can fall back to naming an
+   * area rather than guessing a specific control.
+   */
+  const HL_ROOT_ID = "__jarvis_showme";
+  const HL_PALETTE = ["#ff5c5c", "#56ccf2", "#ffbe3c", "#82dc82", "#c88cff",
+                      "#ff8cbe", "#78f0dc", "#faa05a"];
+  let hlItems = [];                      // [{el|rect, n, label, node, arrow}]
+  let hlRaf = 0;
+
+  function hlRoot() {
+    let r = document.getElementById(HL_ROOT_ID);
+    if (r) return r;
+    r = document.createElement("div");
+    r.id = HL_ROOT_ID;
+    // pointer-events:none is the safety rule — the overlay must never eat a click
+    // meant for the page underneath.
+    r.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;"
+                    + "pointer-events:none;";
+    (document.body || document.documentElement).appendChild(r);
+    return r;
+  }
+
+  function clearShowMe() {
+    hlItems = [];
+    if (hlRaf) { cancelAnimationFrame(hlRaf); hlRaf = 0; }
+    const r = document.getElementById(HL_ROOT_ID);
+    if (r) r.remove();
+    window.removeEventListener("scroll", hlSchedule, true);
+    window.removeEventListener("resize", hlSchedule, true);
+    document.removeEventListener("keydown", hlKey, true);
+    document.removeEventListener("mousedown", hlDismiss, true);
+  }
+
+  function hlKey(e) {
+    if (e.key === "Escape") clearShowMe();
+  }
+  function hlDismiss() { clearShowMe(); }
+
+  function hlSchedule() {
+    if (hlRaf) return;
+    hlRaf = requestAnimationFrame(() => { hlRaf = 0; hlReposition(); });
+  }
+
+  /* Reposition every marker from its element's CURRENT rect. Called on scroll and
+   * resize — this is what "follows the page" means. An element that has been removed
+   * (SPA re-render) drops its marker rather than pointing at empty space. */
+  function hlReposition() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    for (const it of hlItems.slice()) {
+      let r;
+      if (it.el) {
+        if (!it.el.isConnected) { it.node.remove(); if (it.arrow) it.arrow.remove();
+                                  hlItems = hlItems.filter((x) => x !== it); continue; }
+        r = it.el.getBoundingClientRect();
+      } else {
+        r = it.rect;
+      }
+      const off = r.bottom < 0 ? "up" : (r.top > vh ? "down" : "");
+      it.node.style.display = off ? "none" : "block";
+      if (!off) {
+        it.node.style.left = (r.left - 4) + "px";
+        it.node.style.top = (r.top - 4) + "px";
+        it.node.style.width = Math.max(8, r.width + 8) + "px";
+        it.node.style.height = Math.max(8, r.height + 8) + "px";
+      }
+      /* Off-screen: show an arrow at the edge instead of silently hiding. Being told
+       * "it's below, scroll down" is the difference between a hint and a dead end. */
+      if (it.arrow) {
+        it.arrow.style.display = off ? "flex" : "none";
+        if (off) {
+          it.arrow.style.top = off === "up" ? "12px" : (vh - 52) + "px";
+          it.arrow.style.left = Math.min(vw - 120,
+            Math.max(12, (r.left + r.width / 2) - 40)) + "px";
+          it.arrow.firstChild.textContent = (off === "up" ? "▲ " : "▼ ") + it.n;
+        }
+      }
+    }
+  }
+
+  function showMe(items) {
+    clearShowMe();
+    const root = hlRoot();
+    const shown = [];
+    items.slice(0, 8).forEach((it, i) => {
+      const colour = HL_PALETTE[i % HL_PALETTE.length];
+      let el = null, rect = null;
+      if (it.ref) {
+        const bare = String(it.ref).includes(":") ? String(it.ref).split(":").pop()
+                                                  : String(it.ref);
+        const found = FIELDS.get(bare);
+        el = Array.isArray(found) ? found.find((n) => n && n.isConnected) : found;
+        if (!el || !el.isConnected) return;             // stale ref: skip, don't guess
+      } else if (it.selector) {
+        try { el = document.querySelector(it.selector); } catch (e) { el = null; }
+        if (!el) return;
+      } else if (it.rect) {
+        rect = { left: it.rect.x, top: it.rect.y, width: it.rect.w,
+                 height: it.rect.h, bottom: it.rect.y + it.rect.h };
+      } else {
+        return;
+      }
+
+      const box = document.createElement("div");
+      const dashed = it.approximate ? "dashed" : "solid";
+      box.style.cssText =
+        `position:fixed;border:3px ${dashed} ${colour};border-radius:6px;`
+        + `box-shadow:0 0 0 2px rgba(0,0,0,.45),0 0 14px ${colour}88;`
+        + "pointer-events:none;transition:opacity .15s;";
+      const tag = document.createElement("div");
+      tag.textContent = it.label ? (it.n || i + 1) + "  " + it.label : String(it.n || i + 1);
+      tag.style.cssText =
+        `position:absolute;left:-3px;top:-26px;background:${colour};color:#111;`
+        + "font:600 13px/1.6 system-ui,sans-serif;padding:1px 8px;border-radius:5px;"
+        + "white-space:nowrap;max-width:60vw;overflow:hidden;text-overflow:ellipsis;";
+      box.appendChild(tag);
+      root.appendChild(box);
+
+      const arrow = document.createElement("div");
+      arrow.style.cssText =
+        `position:fixed;display:none;align-items:center;background:${colour};color:#111;`
+        + "font:600 13px/1.6 system-ui,sans-serif;padding:3px 10px;border-radius:14px;"
+        + "box-shadow:0 2px 8px rgba(0,0,0,.5);pointer-events:none;";
+      arrow.appendChild(document.createElement("span"));
+      root.appendChild(arrow);
+
+      const n = it.n || i + 1;
+      hlItems.push({ el, rect, n, node: box, arrow });
+      shown.push({ n, label: it.label || "", ref: it.ref || "", offscreen: false });
+    });
+
+    if (!hlItems.length) return { shown: [], error: "nothing to point at" };
+    hlReposition();
+
+    /* Bring ONE target into view, and only when it's off-screen. Scrolling the page
+     * under the user is a real intrusion; doing it when the thing is already visible
+     * would be gratuitous. Never for a multi-item explanation — that would yank the
+     * view away from the overview the user asked for. */
+    if (hlItems.length === 1 && hlItems[0].el) {
+      const r = hlItems[0].el.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) {
+        try { hlItems[0].el.scrollIntoView({ block: "center", behavior: "smooth" }); }
+        catch (e) { /* older engine — the arrow still tells them where it is */ }
+      }
+    }
+
+    window.addEventListener("scroll", hlSchedule, true);
+    window.addEventListener("resize", hlSchedule, true);
+    document.addEventListener("keydown", hlKey, true);
+    document.addEventListener("mousedown", hlDismiss, true);
+    setTimeout(() => { if (hlItems.length) clearShowMe(); }, 30000);
+    return { shown };
+  }
+
   /* Workday-style listbox: a <button aria-haspopup="listbox">, never a <select>.
    * You cannot assign a value — you must open the popup and CLICK the option, and
    * the options don't exist in the DOM until it opens. Hence the async dance:
@@ -1436,6 +1600,52 @@
           text: (text || "").slice(0, 6000),
           csVersion: JARVIS_CS_VERSION,
         });
+      } else if (msg.action === "probe_options") {
+        /* Diagnostic for "the options came back as UUIDs".
+         *
+         * Every unit of the label path passes in isolation against the reported
+         * markup, so the failure is something only the live page shows. Rather than
+         * theorise again, report each step's ACTUAL result per radio input: what the
+         * id is, whether a label[for] exists via each lookup route, what its raw
+         * textContent is, and what optionText finally returned. Whichever step first
+         * yields empty is the bug, with no guessing left to do. */
+        const out = [];
+        const groups = document.querySelectorAll(
+          "fieldset[data-test-form-builder-radio-button-form-component], "
+          + "fieldset, [role='radiogroup']");
+        for (const g of Array.from(groups).slice(0, 6)) {
+          const radios = Array.from(g.querySelectorAll("input[type='radio']")).slice(0, 6);
+          if (!radios.length) continue;
+          out.push({
+            groupTag: g.tagName,
+            groupId: (g.id || "").slice(0, 80),
+            legend: ((g.querySelector("legend") || {}).textContent || "").replace(/\s+/g, " ").trim().slice(0, 90),
+            options: radios.map((el) => {
+              const id = el.id || "";
+              let escOk = null, escErr = null;
+              try {
+                escOk = !!document.querySelector(`label[for="${CSS.escape(id)}"]`);
+              } catch (e) { escErr = String(e.message || e).slice(0, 60); }
+              const scan = Array.from(document.querySelectorAll("label[for]"))
+                .find((n) => n.getAttribute("for") === id) || null;
+              const wrap = el.closest("label");
+              const dataAttr = el.getAttribute("data-test-text-selectable-option__input") || "";
+              return {
+                id: id.slice(-28),
+                value: (el.value || "").slice(0, 12),
+                viaEscape: escOk, escapeError: escErr,
+                viaScan: !!scan,
+                scanRaw: scan ? (scan.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40) : null,
+                wrappingLabel: !!wrap,
+                dataTestAttr: dataAttr.slice(0, 40),
+                optionTextResult: optionText(el).slice(0, 40),
+                inShadow: !!(el.getRootNode && el.getRootNode() !== document),
+              };
+            }),
+          });
+        }
+        respond({ ok: true, csVersion: JARVIS_CS_VERSION, url: location.href.slice(0, 200),
+                  radioGroups: out.length, detail: out });
       } else if (msg.action === "probe_layout") {
         /* Diagnostic: what does this page actually look like to us? Reports which
          * detail-pane selector matches and how many cards we see, so a layout change
@@ -1502,6 +1712,20 @@
         const scan = scanFields();
         respond({ ok: true, url: location.href, ats: atsOf(), isTop: window.top === window,
                   fields: scan.fields, excluded_counts: scan.excluded_counts });
+      } else if (msg.action === "show_me") {
+        // Only mark items this frame actually owns; other frames answer for theirs.
+        const items = ((msg.params && msg.params.items) || []).filter((it) => {
+          if (!it.ref) return true;                   // selector/rect items: try here
+          const bare = String(it.ref).includes(":") ? String(it.ref).split(":").pop()
+                                                    : String(it.ref);
+          return FIELDS.has(bare);
+        });
+        if (!items.length) { respond({ ok: true, shown: [] }); return true; }
+        const r = showMe(items);
+        respond({ ok: true, shown: r.shown, url: location.href });
+      } else if (msg.action === "clear_show_me") {
+        clearShowMe();
+        respond({ ok: true });
       } else if (msg.action === "fill_fields") {
         const results = [];
         // Only the fills whose refs live in THIS frame (see fillOne): every frame gets
@@ -1541,6 +1765,9 @@
   // always yields exactly one live listener (see the header comment).
   window.__jarvisTeardown = () => {
     try { chrome.runtime.onMessage.removeListener(onMessage); } catch (e) { /* gone */ }
+    // Markers are DOM nodes plus window listeners; a re-injection that left them
+    // behind would strand rings on the page with nothing able to clear them.
+    try { clearShowMe(); } catch (e) { /* nothing drawn */ }
     window.__jarvisTeardown = null;
   };
 })();

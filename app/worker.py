@@ -269,7 +269,12 @@ class ClaudeWorker(threading.Thread):
     # The browser tools that only READ (the SDK namespaces in-process MCP tools as
     # mcp__<server>__<tool>, so match on the suffix). Kept as a suffix test rather
     # than exact names so an SDK naming change can't silently re-block reading.
-    _BROWSER_READ_SUFFIXES = ("browser_read_page", "browser_list_fields")
+    # browser_show_me only DRAWS on the page — it can't change a value, submit a form
+    # or read anything new, and the markers are click-through and dismissible with Esc.
+    # Gating it behind an approval card per call would make "show me where" unusable
+    # for the one thing it's for: answering a question immediately.
+    _BROWSER_READ_SUFFIXES = ("browser_read_page", "browser_list_fields",
+                              "browser_show_me")
 
     @classmethod
     def _is_browser_read(cls, tool_name):

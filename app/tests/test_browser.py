@@ -640,3 +640,38 @@ class TestDeleteChats:
         overlay.close_chat(v1)                       # close the OTHER one
         assert v1 not in overlay._views
         assert overlay._active is v2                 # the active chat didn't move
+
+
+# ── the model must learn what the fill actually did ─────────────────────────
+
+def test_fill_result_is_reported_back_to_the_model(overlay):
+    """browser_fill_form returns as soon as a proposal is QUEUED; the typing happens
+    later, after the user clicks Fill. Those per-field results were shown to the user
+    and never to Claude, so it believed the form was filled and could not retry what
+    failed — 'I never receive the result of browser_fill_form'."""
+    class _Btn:
+        _ustate = None
+        def _draw(self): pass
+    overlay._on_fill_result(_Btn(), {
+        "ok": True,
+        "results": [
+            {"ref": "0:f5", "ok": True, "value": "Less than 3 years"},
+            {"ref": "0:f6", "ok": False, "error": "the form changed since it was read"},
+        ],
+    })
+    note = overlay._pending_fill_report
+    assert note, "no fill report was queued for the model"
+    assert "0:f6" in note and "the form changed" in note
+    assert "0:f5" in note
+
+    # it rides along with the next message, and only once
+    prompt = overlay._build_prompt("what now?", [], [])
+    assert "FILL RESULT" in prompt
+    assert "what now?" in prompt
+    assert overlay._pending_fill_report is None
+    assert "FILL RESULT" not in overlay._build_prompt("second message", [], [])
+
+
+def test_no_fill_report_means_an_unchanged_prompt(overlay):
+    overlay._pending_fill_report = None
+    assert overlay._build_prompt("plain", [], []).count("plain") == 1

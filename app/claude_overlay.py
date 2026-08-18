@@ -258,6 +258,7 @@ class ChatView:
         self._md_last_scroll = 0.0
         self._turn_raw = ""
         self._turn_copy_added = False
+        self._pending_fill_report = None   # fill outcome to hand the model with the next message
         self._session_id = None
         self._discard_pending = False
         self._compacting = False
@@ -2566,6 +2567,37 @@ class Overlay:
                      ". Nothing was submitted — review the page and submit yourself.")
         for r in bad[:5]:
             self._ins(f"  • {r.get('ref')}: {r.get('error')}\n", "err")
+        self._queue_fill_report(ok, bad)
+
+    def _queue_fill_report(self, ok, bad):
+        """Tell the MODEL what the fill actually did.
+
+        browser_fill_form returns the moment a proposal is queued — the typing happens
+        later, on the UI thread, only after the user clicks Fill. So every per-field
+        result (refused values, "the form changed", a combobox that never committed)
+        was shown to the user and NEVER to Claude, which went on believing the form was
+        filled and could not retry what failed. The report rides along with the user's
+        next message rather than being injected as a turn of its own, so it can't
+        interrupt or spend a turn on its own."""
+        try:
+            lines = []
+            for r in ok[:12]:
+                v = str(r.get("value", ""))
+                lines.append(f"  OK   {r.get('ref')}"
+                             + (f" = {v[:60]}" if v else ""))
+            for r in bad[:12]:
+                lines.append(f"  FAIL {r.get('ref')}: {str(r.get('error', ''))[:120]}")
+            if not lines:
+                return
+            note = (f"[FILL RESULT — the user approved the fill; {len(ok)} field(s) were "
+                    f"written and {len(bad)} failed. This is what actually happened on "
+                    "the page:\n" + "\n".join(lines)
+                    + "\nFix the failures if you can (re-read the page first if a field "
+                      "reports that the form changed); never re-propose one that "
+                      "succeeded.]")
+            self._pending_fill_report = note
+        except Exception:
+            pass                                # a missing report must never break the UI
 
     # ── voice input (dictation) ──
     def _paint_mic(self, hover=False):
@@ -4542,7 +4574,21 @@ class Overlay:
             note.append(f"[Attached: {len(images)} pasted image(s).]")
         body = text if text else ("Look at the attached screen(s)/image(s) and tell me "
                                    "what's there / what I might want help with.")
-        return ("\n".join(note) + "\n\n" + body) if note else body
+        out = ("\n".join(note) + "\n\n" + body) if note else body
+        return self._with_fill_report(out)
+
+    def _with_fill_report(self, body):
+        """Prepend (and clear) a pending fill result, so the model learns what its last
+        approved fill actually did. Consumed once — a stale report on a later, unrelated
+        message would be worse than none."""
+        note = getattr(self, "_pending_fill_report", None)
+        if not note:
+            return body
+        self._pending_fill_report = None
+        # Appended, not prepended: the user's own words must still open the message
+        # (the armed-tab note relies on that too), and this is context about a past
+        # action rather than part of what they're asking.
+        return body + "\n\n" + note
 
     def _precapture_soon(self, e=None):
         """Debounced: schedule a screen grab shortly after the last keystroke so a
@@ -4604,7 +4650,7 @@ class Overlay:
                          "\nUse the Read tool on each of these exact paths to view them, then respond.")
         parts.append(text if text else
                      "Look at the attached image(s)/screen(s) and tell me what's there / what I might want help with.")
-        return "\n\n".join(parts)
+        return self._with_fill_report("\n\n".join(parts))
 
     def _save_shot(self, img, stem: Path) -> Path:
         """Save a captured screen with the smallest practical inline payload."""
@@ -5768,7 +5814,7 @@ class Overlay:
 _CHAT_FIELDS = (
     "busy", "read_only", "_model", "_ctx_pct", "_claude_header", "_thinking_active",
     "_md_tail", "_md_tbl", "_md_fence", "_md_code", "_md_last_scroll", "_turn_raw",
-    "_turn_copy_added", "_session_id", "_discard_pending",
+    "_turn_copy_added", "_pending_fill_report", "_session_id", "_discard_pending",
     "_compacting", "_compact_line", "_compact_anim_after", "_compact_t0",
     "_compact_frame", "_zoomables", "_sb_first", "_sb_last", "_sb_drag", "_sb_hover",
     "follow", "collecting", "collect_user_set", "collected", "sent_digests",

@@ -194,6 +194,13 @@ async function askFrames(tabId, msg) {
     return { results };
   }
 
+  if (msg.action === "show_me" || msg.action === "clear_show_me") {
+    // Every frame is asked; each marks the items it owns. Merge what was shown.
+    const shown = [];
+    for (const { r } of live) shown.push(...(r.shown || []));
+    return { shown };
+  }
+
   if (msg.action === "collect_snapshot") {
     // whichever frame has the most text is the content (not an ad iframe)
     let best = null;
@@ -290,7 +297,9 @@ async function handle(msg) {
       return;
     }
     if (msg.action === "read_page" || msg.action === "list_fields"
-        || msg.action === "fill_fields" || msg.action === "probe_layout") {
+        || msg.action === "fill_fields" || msg.action === "probe_layout"
+        || msg.action === "show_me" || msg.action === "clear_show_me"
+        || msg.action === "probe_options") {
       const res = await askFrames(tabId, msg);
       if (res.error) { reply({ ok: false, error: res.error }); return; }
       reply(Object.assign({ ok: true, tabUrl: tab.url, tabTitle: tab.title }, res));
