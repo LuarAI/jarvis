@@ -200,20 +200,29 @@ class TestPublicationOwnership:
             b.stop()
 
     def test_live_owner_is_left_alone(self, tmp_path, monkeypatch):
+        """A live overlay keeps its record — but "live" now means its bridge ANSWERS,
+        so the stand-in must actually listen. (It used to publish port 2, which
+        nothing listens on; that is the broken-bridge case, and standing down for it
+        is precisely the bug that left the extension dialling a dead port.)"""
         import subprocess
         monkeypatch.setattr(browser_bridge, "IPC_DIR", str(tmp_path))
         monkeypatch.setattr(browser_bridge, "IPC_FILE", str(tmp_path / "ipc.json"))
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        live_port = listener.getsockname()[1]
         b = browser_bridge.BrowserBridge()
         try:
             (tmp_path / "ipc.json").write_text(
-                json.dumps({"port": 2, "token": "y", "pid": other.pid}), "utf-8")
+                json.dumps({"port": live_port, "token": "y", "pid": other.pid}), "utf-8")
             assert b.start()
             assert b.owns_publication is False       # stood down for the live overlay
             rec = json.loads((tmp_path / "ipc.json").read_text("utf-8"))
-            assert rec["port"] == 2                  # untouched
+            assert rec["port"] == live_port          # untouched
         finally:
             b.stop()
+            listener.close()
             other.kill()
 
     def test_stop_does_not_delete_another_overlays_record(self, tmp_path, monkeypatch):
@@ -221,14 +230,19 @@ class TestPublicationOwnership:
         monkeypatch.setattr(browser_bridge, "IPC_DIR", str(tmp_path))
         monkeypatch.setattr(browser_bridge, "IPC_FILE", str(tmp_path / "ipc.json"))
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)                           # a bridge that really answers
         try:
             (tmp_path / "ipc.json").write_text(
-                json.dumps({"port": 2, "token": "y", "pid": other.pid}), "utf-8")
+                json.dumps({"port": listener.getsockname()[1], "token": "y",
+                            "pid": other.pid}), "utf-8")
             b = browser_bridge.BrowserBridge()
             b.start()
             b.stop()
             assert (tmp_path / "ipc.json").exists()  # the live overlay keeps its link
         finally:
+            listener.close()
             other.kill()
 
     def test_connect_notice_is_announced_once(self, bridge):
@@ -708,3 +722,74 @@ def test_matching_frames_report_the_version():
 
 def test_no_version_at_all_is_reported_as_stale():
     assert "UNKNOWN" in browser_tools._version_stamp({})
+
+
+def _a_live_pid_that_is_not_ours():
+    """A pid that is definitely running and definitely not this process. pid 4
+    (System) exists on every Windows box; fall back to the parent elsewhere."""
+    if os.name == "nt" and browser_bridge.BrowserBridge._pid_alive(4):
+        return 4
+    return os.getppid()
+
+
+class TestBridgeAnswersNotJustAlive:
+    """A live pid is not proof of a live bridge.
+
+    The user hit this: overlay A (7:10pm) owned ipc.json and still held its listening
+    socket, but its bridge thread was dead so every connect() was REFUSED. Overlay B
+    (7:58pm) started, saw a live pid, politely declined to take the file — and the
+    extension spent the evening dialling a port that refused it, with a healthy
+    process and a correct-looking record. Deferring to a broken bridge strands the
+    browser permanently, which is worse than taking the file."""
+
+    def test_a_live_pid_with_a_dead_bridge_is_reclaimed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(browser_bridge, "IPC_DIR", str(tmp_path))
+        monkeypatch.setattr(browser_bridge, "IPC_FILE", str(tmp_path / "ipc.json"))
+        # A port nobody listens on, owned (per the record) by a pid that IS alive —
+        # exactly the state the user was stuck in. Use a foreign live pid so the
+        # guard cannot short-circuit on "that is me".
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        dead_port = s.getsockname()[1]
+        s.close()
+        (tmp_path / "ipc.json").write_text(
+            json.dumps({"port": dead_port, "token": "x",
+                        "pid": _a_live_pid_that_is_not_ours()}), "utf-8")
+
+        b = browser_bridge.BrowserBridge()
+        assert b.start()
+        try:
+            assert b.owns_publication, "declined to take over a bridge that never answers"
+            info = json.loads((tmp_path / "ipc.json").read_text("utf-8"))
+            # the record must now name THIS bridge (the port it actually listens on)
+            assert info["port"] == b.port
+            assert info["token"] == b.token
+        finally:
+            b.stop()
+
+    def test_a_working_bridge_is_still_left_alone(self, tmp_path, monkeypatch):
+        """The original protection must survive: never steal from a healthy overlay.
+
+        Both bridges live in THIS process, and the guard short-circuits on
+        pid == os.getpid() (correct in production: one bridge per overlay). So the
+        record is written with a foreign pid that is genuinely alive, pointing at the
+        first bridge's REAL, answering port — the true "another overlay is fine" case."""
+        monkeypatch.setattr(browser_bridge, "IPC_DIR", str(tmp_path))
+        monkeypatch.setattr(browser_bridge, "IPC_FILE", str(tmp_path / "ipc.json"))
+        first = browser_bridge.BrowserBridge()
+        assert first.start()
+        try:
+            alive_foreign_pid = _a_live_pid_that_is_not_ours()
+            (tmp_path / "ipc.json").write_text(
+                json.dumps({"port": first.port, "token": first.token,
+                            "pid": alive_foreign_pid}), "utf-8")
+            second = browser_bridge.BrowserBridge()
+            assert second.start()
+            try:
+                assert not second.owns_publication, "stole the file from a working bridge"
+                info = json.loads((tmp_path / "ipc.json").read_text("utf-8"))
+                assert info["port"] == first.port
+            finally:
+                second.stop()
+        finally:
+            first.stop()

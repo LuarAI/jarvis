@@ -156,6 +156,27 @@ class BrowserBridge:
             except Exception:
                 return False
 
+    @staticmethod
+    def _published_port_answers():
+        """Does the ADVERTISED port actually accept a connection?
+
+        A live pid is not proof of a live bridge. An overlay whose bridge thread died
+        keeps the process — and the OS keeps the listening socket entry — while every
+        connection is refused because nothing calls accept(). That overlay then owns
+        ipc.json forever, a second overlay politely declines to take it, and the
+        extension dials a port that refuses it: "the extension isn't connected", with
+        a healthy-looking process and a correct-looking record. Ask the port."""
+        try:
+            with open(IPC_FILE, "r", encoding="utf-8") as f:
+                port = json.load(f).get("port")
+            if not isinstance(port, int) or port <= 0:
+                return False
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+            s.close()
+            return True
+        except Exception:
+            return False
+
     def _guard_publication(self):
         """Keep ipc.json pointing at THIS overlay while we're the only live one.
 
@@ -163,13 +184,17 @@ class BrowserBridge:
         when it exited the proxies were left dialling a dead port forever — the
         "extension isn't connected" that no console showed, because nothing was
         wrong in the browser at all. Now: we refuse to steal the file from a LIVE
-        overlay at startup, and we re-publish if a dead one's record replaced ours."""
+        overlay at startup, and we re-publish if a dead one's record replaced ours.
+
+        "Live" means the bridge ANSWERS, not merely that the process exists — see
+        _published_port_answers. Deferring to a process whose bridge is dead strands
+        the browser permanently, which is strictly worse than taking the file."""
         pid = self._published_pid()
         if pid == os.getpid():
             return True
-        if self._pid_alive(pid):
-            return False                # another overlay owns the bridge; leave it be
-        self._publish()                 # stale record (crashed/exited) → reclaim
+        if self._pid_alive(pid) and self._published_port_answers():
+            return False                # another overlay owns a WORKING bridge
+        self._publish()                 # stale record, or a bridge that never answers
         return True
 
     def _watch_publication(self):

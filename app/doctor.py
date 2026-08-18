@@ -32,7 +32,18 @@ OK, BAD, WARN = "[ OK ]", "[FAIL]", "[WARN]"
 
 
 def say(status, what, detail=""):
-    print(f"{status} {what}" + (f"\n       {detail}" if detail else ""))
+    """Print a line that survives a legacy console.
+
+    The diagnostic used arrows and check marks, and Windows' default cp1252 console
+    raised UnicodeEncodeError on the FIRST healthy line — so the one tool meant to
+    explain a broken bridge crashed instead, which is the worst possible moment for
+    it to fail. Re-encode to whatever the terminal can actually print."""
+    line = f"{status} {what}" + (f"\n       {detail}" if detail else "")
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        enc = (getattr(sys.stdout, "encoding", None) or "ascii")
+        print(line.encode(enc, "replace").decode(enc, "replace"))
 
 
 def check_ipc():
