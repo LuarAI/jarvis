@@ -204,6 +204,57 @@ def build_tools(bridge, propose_fill):
                              "text": f"{len(fields)} fillable field(s)"
                                      f"{_version_stamp(res)}:\n{_fmt_fields(fields)}"}]}
 
+    @tool("browser_enumerate_options",
+          "Read the REAL choices a dropdown offers, without selecting anything. Use "
+          "this before proposing a value for any field whose schema says "
+          "optionsDynamic (a type-ahead whose options only exist once its menu is "
+          "open) — otherwise you are guessing at wording, and a guess that nearly "
+          "matches is how a wrong answer lands in a real application. It opens the "
+          "control, reads the list, and closes it again without choosing; nothing is "
+          "typed, selected or submitted. Pass the field's 'ref'.",
+          {"type": "object",
+           "properties": {
+               "ref": {"type": "string",
+                       "description": "field ref from browser_read_page / "
+                                      "browser_list_fields"},
+           },
+           "required": ["ref"]})
+    async def enumerate_options(args):
+        ref = str((args or {}).get("ref", "")).strip()
+        if not ref:
+            return {"content": [{"type": "text", "text": "No ref given."}]}
+        res = bridge.request("enumerate_options", {"ref": ref})
+        if res.get("error") or not res.get("ok"):
+            return {"content": [{"type": "text",
+                                 "text": f"Couldn't read the options: "
+                                         f"{res.get('error') or 'unknown error'}"}]}
+        opts = res.get("options") or []
+        if not opts:
+            return {"content": [{"type": "text",
+                                 "text": "The menu didn't open, so its options can't be "
+                                         "read. Ask the user what this field offers, or "
+                                         "ask them to pick it by hand — do not guess a "
+                                         "value for it."}]}
+        lines = []
+        for o in opts:
+            text = str(o.get("text", ""))
+            mark = ""
+            if o.get("checked") is True:
+                mark = "  [already selected]"
+            elif o.get("checked") is False:
+                mark = "  [unticked]"
+            lines.append(f"  - {text}{mark}")
+        multi = any(o.get("checked") is not None for o in opts)
+        note = ("\nThese are checkboxes, so this may accept SEVERAL values — propose "
+                "them one at a time and check the result of each."
+                if multi else "")
+        return {"content": [{"type": "text",
+                             "text": f"{len(opts)} option(s) offered "
+                                     f"{_version_stamp(res)}:\n"
+                                     + "\n".join(lines)
+                                     + note
+                                     + "\nUse one of these EXACTLY as written."}]}
+
     @tool("browser_probe_options",
           "Diagnostic: why did a multiple-choice question's options come back "
           "unreadable? Reports, for each radio input on the page, its id, whether a "
@@ -325,7 +376,8 @@ def build_tools(bridge, propose_fill):
         status = propose_fill(fills)
         return {"content": [{"type": "text", "text": status}]}
 
-    return [read_page, list_fields, show_me, probe_options, fill_form]
+    return [read_page, list_fields, enumerate_options, show_me,
+            probe_options, fill_form]
 
 
 def build_server(bridge, propose_fill):

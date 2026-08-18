@@ -209,6 +209,14 @@ async function askFrames(tabId, msg) {
     });
   }
 
+  if (msg.action === "enumerate_options") {
+    // Exactly one frame owns the ref; take that frame's answer. A frame that says
+    // "not mine" must not be mistaken for a control with no options.
+    const owner = live.find(({ r }) => r && r.mine);
+    if (owner) return owner.r;
+    return { ok: false, error: "no frame recognised that field — re-read the page" };
+  }
+
   if (msg.action === "show_me" || msg.action === "clear_show_me") {
     // Every frame is asked; each marks the items it owns. Merge what was shown.
     const shown = [];
@@ -326,7 +334,7 @@ async function handle(msg) {
     if (msg.action === "read_page" || msg.action === "list_fields"
         || msg.action === "fill_fields" || msg.action === "probe_layout"
         || msg.action === "show_me" || msg.action === "clear_show_me"
-        || msg.action === "probe_options") {
+        || msg.action === "probe_options" || msg.action === "enumerate_options") {
       const res = await askFrames(tabId, msg);
       if (res.error) { reply({ ok: false, error: res.error }); return; }
       reply(Object.assign({ ok: true, tabUrl: tab.url, tabTitle: tab.title }, res));

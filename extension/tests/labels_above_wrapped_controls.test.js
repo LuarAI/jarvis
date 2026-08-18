@@ -73,12 +73,12 @@ const listeners = [];
 const chrome = { runtime: { onMessage: { addListener: (f) => listeners.push(f),
                                          removeListener() {} } }, dom: {} };
 new Function("window", "chrome", "document", "location", "NodeFilter", "CSS", "self",
-             "setTimeout", "clearTimeout", "URL", "Event", "KeyboardEvent", "Promise",
+             "setTimeout", "clearTimeout", "URL", "Event", "KeyboardEvent", "MouseEvent", "Promise",
              "HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement",
              "requestAnimationFrame", "cancelAnimationFrame", SRC)(
   window, chrome, window.document, window.location, window.NodeFilter, window.CSS, window,
   window.setTimeout.bind(window), window.clearTimeout.bind(window), URL, window.Event,
-  window.KeyboardEvent, Promise, window.HTMLInputElement, window.HTMLTextAreaElement,
+  window.KeyboardEvent, window.MouseEvent, Promise, window.HTMLInputElement, window.HTMLTextAreaElement,
   window.HTMLSelectElement, (f) => window.setTimeout(f, 0), () => {});
 
 let fields = [];

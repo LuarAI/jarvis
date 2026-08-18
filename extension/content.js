@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 13;
+  const JARVIS_CS_VERSION = 14;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -238,6 +238,16 @@
       // A node that CONTAINS a form control is a field, not a caption for one.
       try { if (n.querySelector("input,select,textarea,[role='combobox']")) return ""; }
       catch (e) { /* treat as caption-able */ }
+      /* …and a picker's own SELECTED VALUE is not its question. react-select renders
+       * the chosen option as a plain div beside the input, so once a field had an
+       * answer the walker read it back as the label: a question came through as
+       * "Intermediate". Value nodes name themselves in their class. */
+      try {
+        const cls = String(n.className || "");
+        if (/(single-value|multi-value|placeholder|__value|selected-value)/i.test(cls)) {
+          return "";
+        }
+      } catch (e) { /* no class — carry on */ }
       if (!n.matches(CAPTION)) return "";
       const t = labelText(n);
       return (t && t.length <= 200) ? ok(t) : "";
@@ -904,6 +914,98 @@
     else el.removeAttribute("data-jarvis-hl");
   }
 
+
+  /* ── read a picker's options WITHOUT choosing one ──────────────────────────
+   *
+   * A type-ahead reports optionsDynamic: true because its choices don't exist until
+   * the menu opens — so the field schema carries no list, and the model was reduced
+   * to GUESSING strings ("Daily", "Claude Code") and learning the real wording only
+   * from failure messages. That is a read problem being solved by writes, on a live
+   * application.
+   *
+   * So: open the control, read what appears, put it back the way it was. Nothing is
+   * selected, nothing is typed, and the menu is closed again with Escape. */
+  function enumerateOptions(el, respond) {
+    const input = comboInput(el);
+    const target = input || el;
+    const priorValue = input ? String(input.value || "") : null;
+    const finish = (options, err) => {
+      // Always restore: a diagnostic that leaves the page altered is not read-only.
+      try {
+        if (input && priorValue !== null && input.value !== priorValue) {
+          nativeSet(input, priorValue);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        const esc = { key: "Escape", code: "Escape", keyCode: 27, bubbles: true };
+        target.dispatchEvent(new KeyboardEvent("keydown", esc));
+        target.dispatchEvent(new KeyboardEvent("keyup", esc));
+        target.blur();
+      } catch (e) { /* best effort */ }
+      respond(err ? { ok: false, error: err }
+                  : { ok: true, options, count: options.length,
+                      csVersion: JARVIS_CS_VERSION });
+    };
+
+    try {
+      target.scrollIntoView({ block: "center" });
+      // Click the visible WRAPPER, not the input: the input itself often carries
+      // role="combobox", so clicking "the combobox" clicks nothing that opens.
+      let control = target.parentElement;
+      const declared = target.parentElement
+        && target.parentElement.closest("[role='combobox'],[aria-haspopup='listbox']");
+      if (declared) control = declared;
+      if (control && control !== target) control.click();
+      if (input) {
+        input.focus();
+        // An empty filter shows the FULL list; typing would narrow it and hide options.
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const down = { key: "ArrowDown", code: "ArrowDown", keyCode: 40, bubbles: true };
+        input.dispatchEvent(new KeyboardEvent("keydown", down));
+      } else {
+        target.click();
+      }
+    } catch (e) {
+      finish([], "couldn't open the control: " + String((e && e.message) || e));
+      return;
+    }
+
+    let waited = 0;
+    const STEP = 120, LIMIT = 2500;
+    const poll = () => {
+      const opts = visibleOptions(el);
+      if (opts.length) {
+        const seen = new Set();
+        const out = [];
+        for (const o of opts) {
+          const t = optLabel(o);
+          if (!t || seen.has(t)) continue;
+          seen.add(t);
+          out.push({
+            text: t.slice(0, 120),
+            // a checkbox/radio in the row means multi-select is plausible, and tells
+            // the caller what is already ticked
+            checked: (() => {
+              try {
+                const b = o.querySelector("input[type='checkbox'],input[type='radio']");
+                return b ? !!b.checked : undefined;
+              } catch (e) { return undefined; }
+            })(),
+          });
+          if (out.length >= 60) break;
+        }
+        finish(out);
+        return;
+      }
+      if (waited >= LIMIT) {
+        finish([], "the menu never opened, so its options could not be read");
+        return;
+      }
+      waited += STEP;
+      setTimeout(poll, STEP);
+    };
+    setTimeout(poll, 150);
+  }
+
   /* ── "show me where": point at things on the page ──────────────────────────
    *
    * Drawn IN THE PAGE, not on a screen overlay. That's the whole design decision:
@@ -1193,6 +1295,15 @@
   const OPT_SEL = "[role='option'], [data-automation-id='promptOption'], "
                 + "[data-automation-id='menuItem'], li[role='option'], li";
 
+  /* What may be treated as an option when searching OUTSIDE the field's own subtree.
+   * Deliberately excludes a bare `li`: page prose lives in lists too, and accepting it
+   * is how a job posting's bullets became a dropdown's choices. */
+  const PORTAL_OPT_SEL =
+      "[role='listbox'] [role='option'], [role='menu'] [role='menuitem'], "
+    + "[role='option'], [data-automation-id='promptOption'], "
+    + "[data-automation-id='menuItem'], "
+    + "[class*='menu'] li, [class*='option']";
+
   function optLabel(o) {
     return (o.innerText || o.textContent || "").replace(/\s+/g, " ").trim();
   }
@@ -1214,7 +1325,13 @@
        * name/email/phone fill failed with "no option matching" against the job ad's
        * own text. Callers that are still deciding pass scopedOnly. */
       if (!nodes.length && !scopedOnly) {
-        nodes = Array.from(document.querySelectorAll(OPT_SEL));
+        /* Portalled menus (react-select, Workday) render outside the field's subtree,
+         * usually on <body> — so a document sweep is the only way to find them. But it
+         * must only look at things that are unambiguously MENU ITEMS: the bare `li` in
+         * OPT_SEL matched the job ad's own bullet list, and a fill that couldn't find
+         * its menu offered "📍 Location: Remote (LATAM)" as an option. A portalled menu
+         * always sits in a live listbox/menu container; a paragraph of prose does not. */
+        nodes = Array.from(document.querySelectorAll(PORTAL_OPT_SEL));
       }
     } catch (e) { /* none */ }
     return nodes.filter((o) => {
@@ -1324,6 +1441,15 @@
             const text = optLabel(m.hit);
             try {
               m.hit.scrollIntoView({ block: "nearest" });
+              /* Some pickers (react-select among them) bind selection to MOUSEDOWN and
+               * ignore a bare click, so send the full sequence a real pointer produces.
+               * Harmless where click alone works — the option is already chosen by the
+               * time click fires, and the verification below is what decides. */
+              for (const type of ["pointerdown", "mousedown", "mouseup"]) {
+                try {
+                  m.hit.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+                } catch (e) { /* engine lacks MouseEvent for this type — click still runs */ }
+              }
               m.hit.click();
               /* Some menus are lists of CHECKBOXES, and clicking the row's text does
                * not necessarily tick the box — "clicked 'USD' but the field didn't
@@ -1384,9 +1510,15 @@
           }
         }
         if (waited >= LIMIT) {
-          giveUp(opts.length ? `no option matching "${value}"`
-                             : "the option list never appeared (the site may still be "
-                               + "searching, or this control needs a real click)");
+          /* Fail loudly and say WHICH failure it was. "The menu never opened" and "the
+           * menu opened but has no such option" need different responses, and lumping
+           * them together sent the model retrying values into a control that was never
+           * going to show a list. */
+          giveUp(opts.length
+            ? `no option matching "${value}"`
+            : "the menu never opened, so its options could not be read — this control "
+              + "may need to be picked by hand (nothing on the page was treated as an "
+              + "option: page text is never offered as a choice)");
           return;
         }
         waited += STEP;
@@ -1935,6 +2067,32 @@
         respond({ ok: true, url: location.href, ats: atsOf(), isTop: window.top === window,
                   csVersion: JARVIS_CS_VERSION,
                   fields: scan.fields, excluded_counts: scan.excluded_counts });
+      } else if (msg.action === "enumerate_options") {
+        /* Read a picker's real choices instead of guessing at them. Only the frame
+         * that owns the ref answers; the rest report zero so the merge can tell
+         * "not mine" from "no options". */
+        const raw = String((msg.params && msg.params.ref) || "");
+        const bare = raw.includes(":") ? raw.split(":").pop() : raw;
+        const found = FIELDS.get(bare);
+        const el = Array.isArray(found) ? found.find((n) => n && n.isConnected) : found;
+        if (!el || !el.isConnected) { respond({ ok: true, mine: false, options: [] }); return true; }
+        /* A radio/checkbox GROUP already knows its options from the scan — no need to
+         * open anything, and nothing to restore. */
+        if (Array.isArray(found)) {
+          const opts = found.filter((n) => n && n.isConnected).map((n) => ({
+            text: optionText(n), checked: !!n.checked }));
+          respond({ ok: true, mine: true, options: opts, count: opts.length,
+                    csVersion: JARVIS_CS_VERSION });
+          return true;
+        }
+        if (el.tagName === "SELECT") {
+          const opts = Array.from(el.options).slice(0, 60).map((o) => ({
+            text: (o.text || "").trim(), checked: !!o.selected }));
+          respond({ ok: true, mine: true, options: opts, count: opts.length,
+                    csVersion: JARVIS_CS_VERSION });
+          return true;
+        }
+        enumerateOptions(el, (r) => respond(Object.assign({ mine: true }, r)));
       } else if (msg.action === "show_me") {
         // Only mark items this frame actually owns; other frames answer for theirs.
         const items = ((msg.params && msg.params.items) || []).filter((it) => {
