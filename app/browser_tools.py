@@ -150,8 +150,18 @@ def build_tools(bridge, propose_fill):
             return {"content": [{"type": "text",
                                  "text": f"Couldn't list fields: {res.get('error') or 'unknown error'}"}]}
         fields = res.get("fields") or []
+        # Name the content-script version in the output. A payload that disagrees with
+        # this code is almost always an OLD script still resident in the page (an SPA
+        # keeps one alive across navigations), and there was previously no way to tell
+        # the two apart — which cost several rounds of debugging code that wasn't the
+        # code running.
+        ver = res.get("csVersion")
+        stamp = (f" [content script v{ver}]" if ver is not None else
+                 " [content script version UNKNOWN — it predates this build, so the page "
+                 "is running a stale script: reload the extension, then reload the page]")
         return {"content": [{"type": "text",
-                             "text": f"{len(fields)} fillable field(s):\n{_fmt_fields(fields)}"}]}
+                             "text": f"{len(fields)} fillable field(s){stamp}:\n"
+                                     f"{_fmt_fields(fields)}"}]}
 
     @tool("browser_probe_options",
           "Diagnostic: why did a multiple-choice question's options come back "

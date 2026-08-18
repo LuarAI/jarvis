@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 7;
+  const JARVIS_CS_VERSION = 8;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -1580,6 +1580,7 @@
           isTop: window.top === window,
           page_text: text,
           fields: fields,
+          csVersion: JARVIS_CS_VERSION,
           excluded_counts: excluded,
           warnings: warnings.length ? warnings : undefined,
         });
@@ -1710,7 +1711,12 @@
                                       : null });
       } else if (msg.action === "list_fields") {
         const scan = scanFields();
+        // csVersion travels WITH the fields. Without it there was no way to tell
+        // whether a surprising payload came from this code or from an older script
+        // still resident in the page — which cost several rounds of debugging a
+        // version that turned out not to be the one running.
         respond({ ok: true, url: location.href, ats: atsOf(), isTop: window.top === window,
+                  csVersion: JARVIS_CS_VERSION,
                   fields: scan.fields, excluded_counts: scan.excluded_counts });
       } else if (msg.action === "show_me") {
         // Only mark items this frame actually owns; other frames answer for theirs.
