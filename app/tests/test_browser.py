@@ -675,3 +675,33 @@ def test_fill_result_is_reported_back_to_the_model(overlay):
 def test_no_fill_report_means_an_unchanged_prompt(overlay):
     overlay._pending_fill_report = None
     assert overlay._build_prompt("plain", [], []).count("plain") == 1
+
+
+# ── which content script answered ───────────────────────────────────────────
+
+def test_a_stale_frame_names_itself():
+    """A form can live in an iframe while the page around it is a different app, and
+    each frame can run a different build (an SPA keeps old scripts alive). Without
+    this, a payload from stale code was indistinguishable from a live bug — which is
+    what turned one LinkedIn issue into several rounds of debugging code that wasn't
+    the code running."""
+    out = browser_tools._version_stamp(
+        {"csVersion": None,
+         "frameVersions": [{"frameId": 0, "csVersion": 8},
+                           {"frameId": 3, "csVersion": None}]})
+    assert "STALE" in out and "frame(s) 3" in out
+    assert "Reload the extension" in out
+
+
+def test_matching_frames_report_the_version():
+    out = browser_tools._version_stamp(
+        {"csVersion": 8, "frameVersions": [{"frameId": 0, "csVersion": 8}]})
+    assert out.strip() == "[content script v8]"
+    multi = browser_tools._version_stamp(
+        {"csVersion": 8, "frameVersions": [{"frameId": 0, "csVersion": 8},
+                                           {"frameId": 2, "csVersion": 8}]})
+    assert "v8" in multi and "2 frames" in multi
+
+
+def test_no_version_at_all_is_reported_as_stale():
+    assert "UNKNOWN" in browser_tools._version_stamp({})

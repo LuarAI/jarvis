@@ -228,7 +228,16 @@ async function askFrames(tabId, msg) {
   const fields = [];
   let page_text = "", url = "", title = "", ats = "generic";
   const excluded = { credentials: 0, hidden_or_honeypot: 0 };
+  /* Which content-script version answered — per frame.
+   *
+   * The merge used to drop this entirely, so a stale script in ONE frame was
+   * invisible: the reply looked like a single coherent answer even when an Easy
+   * Apply iframe was running an old build and the top frame a new one. Report the
+   * lowest version seen, plus the per-frame detail, so "reload the extension" is a
+   * fact rather than a guess. A frame that reports nothing predates the stamp. */
+  const versions = [];
   for (const { frameId, r } of live) {
+    versions.push({ frameId, csVersion: (r && r.csVersion) || null });
     for (const f of r.fields || []) {
       fields.push(Object.assign({}, f, { ref: frameId + ":" + f.ref }));
     }
@@ -242,7 +251,10 @@ async function askFrames(tabId, msg) {
     }
     if (r.ats && r.ats !== "generic") ats = r.ats;
   }
-  return { fields, page_text, url, title, ats, excluded_counts: excluded };
+  const known = versions.map((v) => v.csVersion).filter((v) => v !== null);
+  const csVersion = known.length === versions.length ? Math.min.apply(null, known) : null;
+  return { fields, page_text, url, title, ats, excluded_counts: excluded,
+           csVersion, frameVersions: versions };
 }
 
 /* Which tab does Jarvis act on?

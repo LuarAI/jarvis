@@ -45,6 +45,31 @@ UNTRUSTED_NOTE = (
 MAX_TEXT = 20_000
 
 
+def _version_stamp(res):
+    """Which content script answered, per frame.
+
+    A form can live in an iframe (LinkedIn's Easy Apply, Greenhouse's embed) while the
+    surrounding page is a different app entirely — and each frame can be running a
+    different build, because an SPA keeps an old script alive across navigations. That
+    made "the fix is shipped" unverifiable: a payload disagreeing with this code was
+    indistinguishable from a stale script in one frame. Naming the versions turns a
+    debugging session into a one-line check."""
+    frames = res.get("frameVersions") or []
+    stale = [f for f in frames if f.get("csVersion") is None]
+    if stale and frames:
+        which = ", ".join(str(f.get("frameId")) for f in stale)
+        return (f" [STALE CONTENT SCRIPT in frame(s) {which} — they predate this build, "
+                "so their fields come from OLD code. Reload the extension at "
+                "chrome://extensions, then reload the page, before trusting this]")
+    ver = res.get("csVersion")
+    if ver is None:
+        return (" [content script version UNKNOWN — the page is running a script older "
+                "than this build: reload the extension, then reload the page]")
+    if len(frames) > 1:
+        return f" [content script v{ver}, {len(frames)} frames]"
+    return f" [content script v{ver}]"
+
+
 def _fmt_fields(fields):
     """Compact, model-friendly rendering of the field schema (JSON, but trimmed of
     empty keys so a 60-field form doesn't eat the context window). Fields whose label
@@ -135,7 +160,7 @@ def build_tools(bridge, propose_fill):
             + (f"; {ex.get('credentials', 0)} credential/payment and "
                f"{ex.get('hidden_or_honeypot', 0)} hidden fields were excluded and "
                f"cannot be filled" if ex else "")
-            + f"):\n{_fmt_fields(fields)}"
+            + f"){_version_stamp(res)}:\n{_fmt_fields(fields)}"
         )
         return {"content": [{"type": "text", "text": body}]}
 
@@ -155,13 +180,9 @@ def build_tools(bridge, propose_fill):
         # keeps one alive across navigations), and there was previously no way to tell
         # the two apart — which cost several rounds of debugging code that wasn't the
         # code running.
-        ver = res.get("csVersion")
-        stamp = (f" [content script v{ver}]" if ver is not None else
-                 " [content script version UNKNOWN — it predates this build, so the page "
-                 "is running a stale script: reload the extension, then reload the page]")
         return {"content": [{"type": "text",
-                             "text": f"{len(fields)} fillable field(s){stamp}:\n"
-                                     f"{_fmt_fields(fields)}"}]}
+                             "text": f"{len(fields)} fillable field(s)"
+                                     f"{_version_stamp(res)}:\n{_fmt_fields(fields)}"}]}
 
     @tool("browser_probe_options",
           "Diagnostic: why did a multiple-choice question's options come back "
