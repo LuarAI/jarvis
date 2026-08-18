@@ -2547,8 +2547,34 @@ class Overlay:
 
         def bg():
             res = self.bridge.request("fill_fields", {"fills": fills}, timeout=60.0)
+            self._account_for_every_fill(fills, res)
             self._app_q.put(("fill_result", (btn, res)))
         threading.Thread(target=bg, daemon=True).start()
+
+    @staticmethod
+    def _account_for_every_fill(fills, res):
+        """Give every proposed field a terminal state.
+
+        Each frame answers only for the refs it owns, so a ref no frame recognises —
+        stale after a re-render, or in a frame that stopped responding — simply
+        vanished from the results. Nine proposed, seven reported: the two missing ones
+        were indistinguishable from fields that were never proposed, which is the one
+        failure the model cannot see or correct. Anything unaccounted for is reported
+        as a failure, because a silent disappearance is not a success."""
+        if not isinstance(res, dict):
+            return
+        results = res.get("results")
+        if not isinstance(results, list):
+            return
+        seen = {str(r.get("ref")) for r in results if isinstance(r, dict)}
+        for f in fills or []:
+            ref = str(f.get("ref", ""))
+            if ref and ref not in seen:
+                results.append({
+                    "ref": ref, "ok": False,
+                    "error": "no frame recognised this field — the page probably "
+                             "re-rendered since it was read; re-read it before filling",
+                })
 
     def _on_fill_result(self, btn, res):
         try:

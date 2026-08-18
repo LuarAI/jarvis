@@ -793,3 +793,29 @@ class TestBridgeAnswersNotJustAlive:
                 second.stop()
         finally:
             first.stop()
+
+
+def test_every_proposed_fill_gets_a_terminal_state(overlay):
+    """Nine proposed, seven reported: two refs vanished with no outcome at all.
+
+    Each frame answers only for the refs it owns, so a ref no frame recognises —
+    stale after a re-render — simply disappeared from the results. That is the one
+    failure mode the model cannot see or correct for, since a missing row is
+    indistinguishable from a field that was never proposed."""
+    fills = [{"ref": "0:f1", "value": "Juan Pablo"},
+             {"ref": "0:f10", "value": "https://example.com"},
+             {"ref": "0:f11", "value": "a summary"}]
+    res = {"ok": True, "results": [{"ref": "0:f1", "ok": True, "value": "Juan Pablo"}]}
+    overlay._account_for_every_fill(fills, res)
+    by_ref = {r["ref"]: r for r in res["results"]}
+    assert set(by_ref) == {"0:f1", "0:f10", "0:f11"}, "a proposed field had no outcome"
+    assert by_ref["0:f1"]["ok"] is True
+    for ref in ("0:f10", "0:f11"):
+        assert by_ref[ref]["ok"] is False
+        assert "re-render" in by_ref[ref]["error"] or "recognised" in by_ref[ref]["error"]
+
+
+def test_accounting_leaves_a_complete_result_untouched(overlay):
+    res = {"ok": True, "results": [{"ref": "0:f1", "ok": True, "value": "x"}]}
+    overlay._account_for_every_fill([{"ref": "0:f1", "value": "x"}], res)
+    assert len(res["results"]) == 1 and res["results"][0]["ok"] is True

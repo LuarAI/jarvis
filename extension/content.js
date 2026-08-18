@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 10;
+  const JARVIS_CS_VERSION = 11;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -1085,14 +1085,43 @@
         const n = document.getElementById(id);
         if (n) return n;
       }
-      const host = el.closest("[role='combobox'],[aria-haspopup='listbox']") || el.parentElement;
-      if (host) {
-        const n = host.querySelector("[role='listbox'],ul,ol");
-        if (n) return n;
-        // some render the popup as a sibling of the wrapper rather than a child
-        const sib = host.parentElement
-          && host.parentElement.querySelector("[role='listbox']");
+      /* Only a DECLARED combobox wrapper may claim a list.
+       *
+       * This used to fall back to el.parentElement, which on a flat form is the
+       * <form> itself — so the first <ul> anywhere in the form became "this field's
+       * options". A Recruiterflow page carries an intl-tel-input country list
+       * (~240 <li role="option">) and the job ad's bullet list inside that same form,
+       * and every plain text input consequently matched against country names and
+       * job-description bullets. An undeclared parent gets nothing. */
+      const declared = el.closest("[role='combobox'],[aria-haspopup='listbox']");
+      if (declared) {
+        const n = declared.querySelector("[role='listbox'],ul,ol");
+        if (n) {
+          const owner = n.closest("[role='combobox'],[aria-haspopup='listbox']");
+          if (!owner || owner === declared) return n;
+        }
+        // some render the popup as a SIBLING of the wrapper rather than a child
+        const sib = declared.parentElement
+          && declared.parentElement.querySelector("[role='listbox']");
         if (sib) return sib;
+      }
+      /* No declared wrapper: a real type-ahead's popup is rendered right beside the
+       * input (Strider). Accept only an IMMEDIATE sibling list, or one inside an
+       * immediate sibling — never a sweep of the whole container. */
+      const near = [];
+      for (let s = el.nextElementSibling, i = 0; s && i < 3; s = s.nextElementSibling, i++) {
+        near.push(s);
+      }
+      const p = el.parentElement;
+      if (p) {
+        for (let s = p.nextElementSibling, i = 0; s && i < 2; s = s.nextElementSibling, i++) {
+          near.push(s);
+        }
+      }
+      for (const cand of near) {
+        if (cand.matches && cand.matches("[role='listbox'],ul,ol")) return cand;
+        const inner = cand.querySelector && cand.querySelector("[role='listbox'],ul,ol");
+        if (inner) return inner;
       }
     } catch (e) { /* fall through */ }
     return null;
@@ -1138,12 +1167,20 @@
    * Scoping matters: a page with three skill pickers has three <ul>s, and a
    * document-wide query would happily click an option belonging to a different one.
    * Fall back to a document sweep only for popups portalled to <body> (Workday). */
-  function visibleOptions(el) {
+  function visibleOptions(el, scopedOnly) {
     let nodes = [];
     const box = comboListbox(el);
     try {
       if (box) nodes = Array.from(box.querySelectorAll(OPT_SEL));
-      if (!nodes.length) nodes = Array.from(document.querySelectorAll(OPT_SEL));
+      /* The document-wide sweep exists for popups portalled to <body> (Workday), but
+       * it must never decide WHETHER a field is a picker: a page with an
+       * intl-tel-input country list (~240 <li role="option">) or a job posting's
+       * bullet <li>s made every plain text input look like a type-ahead, and every
+       * name/email/phone fill failed with "no option matching" against the job ad's
+       * own text. Callers that are still deciding pass scopedOnly. */
+      if (!nodes.length && !scopedOnly) {
+        nodes = Array.from(document.querySelectorAll(OPT_SEL));
+      }
     } catch (e) { /* none */ }
     return nodes.filter((o) => {
       try {
@@ -1577,7 +1614,8 @@
          * accepted. Hand off to the commit path. */
         if (el.tagName === "INPUT" && !el.getAttribute("list")) {
           return new Promise((res) => setTimeout(res, 400)).then(() => {
-            if (!visibleOptions(el).length) {
+            // SCOPED only: a list elsewhere on the page is not this field's list.
+            if (!visibleOptions(el, true).length) {
               el.blur();
               highlight(el, "filled");
               return { ref, ok: true, value: String(el.value || "").slice(0, 200) };
