@@ -54,6 +54,28 @@ def _fmt_fields(fields):
     for f in fields or []:
         d = {k: v for k, v in f.items() if v not in ("", None, False, [])}
         d.pop("currentValue", None) if not d.get("currentValue") else None
+        # Options as a plain list of the VISIBLE choices.
+        #
+        # They used to be {value, text} pairs, and on LinkedIn the `value` is an opaque
+        # UUID that is IDENTICAL across unrelated questions — the same
+        # c3d079e4-… is "8+ years" on one question and "Production implementations" on
+        # the next. Four such questions rendered as ~80 lines in which the repeated
+        # UUIDs dominated and the real choices were buried, and the model concluded the
+        # options were unreadable and refused to answer any of them. It was right to
+        # refuse; it was reading noise. The `value` is internal — filling matches on
+        # visible text — so it has no business being shown at all.
+        opts = d.get("options")
+        if isinstance(opts, list) and opts:
+            texts = []
+            for o in opts:
+                if isinstance(o, dict):
+                    t = str(o.get("text") or "").strip() or str(o.get("value") or "").strip()
+                else:
+                    t = str(o).strip()
+                if t:
+                    texts.append(t)
+            if texts:
+                d["options"] = texts
         if d.get("labelSource") in (None, "none") or not d.get("label"):
             d["UNLABELLED"] = "ask the user what this field is — do not guess"
         elif d.get("labelSource") == "nearby-text":
@@ -131,6 +153,68 @@ def build_tools(bridge, propose_fill):
         return {"content": [{"type": "text",
                              "text": f"{len(fields)} fillable field(s):\n{_fmt_fields(fields)}"}]}
 
+    @tool("browser_show_me",
+          "Point AT things on the page so the user can see where they are: draws a "
+          "numbered ring around each one, in the page itself, which follows the "
+          "element as they scroll. Use it whenever a location is easier to show than "
+          "to describe — 'where do I upload my CV', 'what is this page for', 'which "
+          "button submits'. Two shapes, and picking the right one matters: pass "
+          "`ref` (from browser_read_page) to ring ONE specific control — always "
+          "prefer this, it is exact; pass `selector` for something that has no field "
+          "ref, like a heading or a panel. Mark an item `approximate: true` when you "
+          "are not certain it is the right element — it is then drawn dashed, so the "
+          "user knows to check rather than trust it. Up to 8 at a time; keep it to "
+          "the few that answer the question, not everything on screen. Nothing is "
+          "clicked, changed or submitted, and the user dismisses it with Esc.",
+          {"type": "object",
+           "properties": {
+               "items": {
+                   "type": "array",
+                   "description": "What to point at, in the order you want them numbered.",
+                   "items": {
+                       "type": "object",
+                       "properties": {
+                           "ref": {"type": "string",
+                                   "description": "field ref from browser_read_page — "
+                                                  "the exact way to point at a form control"},
+                           "selector": {"type": "string",
+                                        "description": "CSS selector, for things that "
+                                                       "aren't form fields (a nav bar, a "
+                                                       "heading, a panel)"},
+                           "label": {"type": "string",
+                                     "description": "short caption shown on the marker, "
+                                                    "e.g. 'upload your CV here'"},
+                           "approximate": {"type": "boolean",
+                                           "description": "true if you're not sure this is "
+                                                          "the right element (drawn dashed)"},
+                       },
+                   },
+               }
+           },
+           "required": ["items"]})
+    async def show_me(args):
+        items = (args or {}).get("items") or []
+        if not items:
+            return {"content": [{"type": "text", "text": "Nothing to point at."}]}
+        res = bridge.request("show_me", {"items": items[:8]})
+        if res.get("error") or not res.get("ok"):
+            return {"content": [{"type": "text",
+                                 "text": f"Couldn't highlight: {res.get('error') or 'unknown error'}"}]}
+        shown = res.get("shown") or []
+        if not shown:
+            # Say so plainly: a silent no-op would leave the model claiming it pointed
+            # at something the user cannot see.
+            return {"content": [{"type": "text",
+                                 "text": "Nothing was highlighted — those refs/selectors "
+                                         "didn't match anything on the page. Re-read the "
+                                         "page and try again."}]}
+        names = ", ".join(f"{s.get('n')}: {s.get('label') or s.get('ref') or '?'}"
+                          for s in shown)
+        return {"content": [{"type": "text",
+                             "text": f"Highlighted {len(shown)} item(s) on the page — "
+                                     f"{names}. They're numbered on screen; the user can "
+                                     "press Esc to dismiss. Refer to them by number."}]}
+
     @tool("browser_fill_form",
           "Propose values for form fields in the armed tab. This does NOT fill anything: "
           "the user sees every proposed field and value in Jarvis and approves or edits "
@@ -171,7 +255,7 @@ def build_tools(bridge, propose_fill):
         status = propose_fill(fills)
         return {"content": [{"type": "text", "text": status}]}
 
-    return [read_page, list_fields, fill_form]
+    return [read_page, list_fields, show_me, fill_form]
 
 
 def build_server(bridge, propose_fill):

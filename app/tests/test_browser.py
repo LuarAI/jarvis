@@ -23,6 +23,45 @@ import browser_tools
 import claude_overlay as co
 
 
+# ── what the MODEL is shown for a multiple-choice question ──────────────────
+
+def test_options_are_the_visible_choices_not_internal_ids():
+    """LinkedIn gives every option an opaque UUID `value`, and reuses the SAME UUIDs
+    across unrelated questions — c3d079e4… is "8+ years" on one and "Production
+    implementations" on the next. Showing them made four questions render as ~80
+    lines of near-identical noise, and the model reported the options as unreadable
+    and refused to answer any of them."""
+    uuids = ["c3d079e4-aa73-4163-beea-0547fff82d95",
+             "76696175-b430-4dba-a581-c421375d919f"]
+    fields = [
+        {"ref": "f1", "kind": "radio", "labelSource": "legend",
+         "label": "How many years of professional React experience do you have?",
+         "options": [{"value": uuids[0], "text": "8+ years"},
+                     {"value": uuids[1], "text": "Less than 3 years"}]},
+        {"ref": "f2", "kind": "radio", "labelSource": "legend",
+         "label": "Have you built chat-based web applications?",
+         "options": [{"value": uuids[0], "text": "Production implementations"},
+                     {"value": uuids[1], "text": "No experience"}]},
+    ]
+    out = browser_tools._fmt_fields(fields)
+    for u in uuids:
+        assert u not in out, "an internal option id leaked into the model's view"
+    for text in ("8+ years", "Less than 3 years",
+                 "Production implementations", "No experience"):
+        assert text in out, f"the visible choice {text!r} is missing"
+    data = json.loads(out)
+    assert data[0]["options"] == ["8+ years", "Less than 3 years"]
+    assert data[1]["options"] == ["Production implementations", "No experience"]
+
+
+def test_option_falls_back_to_its_value_when_it_has_no_text():
+    """An option with no rendered label must still be offered, not silently dropped."""
+    out = json.loads(browser_tools._fmt_fields(
+        [{"ref": "f1", "kind": "select", "label": "Country", "labelSource": "label-for",
+          "options": [{"value": "us", "text": ""}, {"value": "ca", "text": "Canada"}]}]))
+    assert out[0]["options"] == ["us", "Canada"]
+
+
 # ── a fake extension: connects like the native host proxy does ───────────────
 
 class FakeProxy:
