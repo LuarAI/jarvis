@@ -691,12 +691,15 @@ def test_a_stale_frame_names_itself():
                            {"frameId": 3, "csVersion": None}]})
     assert "STALE" in out and "frame(s) 3" in out
     assert "Reload the extension" in out
+    # the OVERLAY version is stamped unconditionally: its absence means Jarvis itself
+    # was never restarted, which reloading the extension does nothing about
+    assert "Jarvis " in out
 
 
 def test_matching_frames_report_the_version():
     out = browser_tools._version_stamp(
         {"csVersion": 8, "frameVersions": [{"frameId": 0, "csVersion": 8}]})
-    assert out.strip() == "[content script v8]"
+    assert out.strip() == "[Jarvis " + browser_tools._APP_VERSION + "; content script v8]"
     multi = browser_tools._version_stamp(
         {"csVersion": 8, "frameVersions": [{"frameId": 0, "csVersion": 8},
                                            {"frameId": 2, "csVersion": 8}]})

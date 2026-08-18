@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 8;
+  const JARVIS_CS_VERSION = 9;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -331,11 +331,54 @@
 
   /* The visible text of one radio/checkbox option: its own label, not the group's
    * question. LinkedIn puts it in <label for>; other forms wrap the input. */
+  /* The visible text of ONE radio/checkbox option.
+   *
+   * Every route is tried before giving up, because the last line used to be
+   * `return el.value` — and on LinkedIn `value` is an opaque UUID. A failed lookup
+   * therefore returned something that LOOKED like data, so four questions came back
+   * as sixteen UUIDs with nothing to indicate the labels had simply not been found.
+   * Never invent a label from an internal id: an option with no readable text is
+   * reported as empty, and the caller marks the field unlabelled so the model asks
+   * instead of proposing a UUID. */
   function optionText(el) {
-    const lab = (el.id && labelElementFor(el.id)) || el.closest("label");
-    const t = labelText(lab);
+    // 1. <label for> — the standard association (both id lookups)
+    let t = labelText((el.id && labelElementFor(el.id)) || null);
     if (t) return t;
-    return (el.value || "").trim();
+    // 2. a wrapping <label>
+    t = labelText(el.closest("label"));
+    if (t) return t;
+    // 3. LinkedIn states the option text on the input AND its label as data-test-*.
+    //    Free, exact, and immune to how the label is associated.
+    for (const a of ["data-test-text-selectable-option__input",
+                     "data-test-text-selectable-option__label"]) {
+      const v = (el.getAttribute(a) || "").trim();
+      if (v) return v;
+    }
+    // 4. aria-label / aria-labelledby on the input itself
+    t = (el.getAttribute("aria-label") || "").trim();
+    if (t) return t;
+    const lb = el.getAttribute("aria-labelledby");
+    if (lb) {
+      const parts = lb.split(/\s+/).map((id) => document.getElementById(id))
+        .filter(Boolean).map(labelText).filter(Boolean);
+      if (parts.length) return parts.join(" ");
+    }
+    // 5. the option's own row: the text sitting next to the control
+    const row = el.closest("[data-test-text-selectable-option], li, .display-flex")
+             || el.parentElement;
+    if (row) {
+      const clone = row.cloneNode(true);
+      clone.querySelectorAll("input,select,textarea").forEach((n) => n.remove());
+      t = labelText(clone);
+      if (t && t.length <= 120) return t;
+    }
+    // 6. a sibling label whose `for` is unusable (an id CSS can't express)
+    if (el.id) {
+      const sib = (row || document).querySelector("label");
+      t = labelText(sib);
+      if (t) return t;
+    }
+    return "";                     // NOT el.value — a UUID is not a label
   }
 
   /* The question a radio GROUP asks — one level up from the individual options.
@@ -415,8 +458,15 @@
         }
         g.members.push(el);
         const text = optionText(el);
+        /* No readable text? Say so, don't ship the value.
+         *
+         * The value can be an opaque UUID (LinkedIn), so passing it off as the option
+         * text turned "we couldn't read the labels" into "here are your four choices:
+         * c3d079e4…". Flag the group instead: the model then asks rather than
+         * proposing an id it can't interpret, and the failure is visible. */
+        if (!text) g.field.optionsUnreadable = true;
         g.field.options.push({ value: el.value || text, text });
-        if (el.checked) g.field.currentValue = text || el.value || "";
+        if (el.checked) g.field.currentValue = text || "(selected)";
         continue;
       }
       const ref = "f" + ++refSeq;

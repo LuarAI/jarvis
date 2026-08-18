@@ -45,6 +45,12 @@ UNTRUSTED_NOTE = (
 MAX_TEXT = 20_000
 
 
+try:
+    from config import __version__ as _APP_VERSION
+except Exception:                       # config is optional for unit tests
+    _APP_VERSION = "?"
+
+
 def _version_stamp(res):
     """Which content script answered, per frame.
 
@@ -54,20 +60,25 @@ def _version_stamp(res):
     made "the fix is shipped" unverifiable: a payload disagreeing with this code was
     indistinguishable from a stale script in one frame. Naming the versions turns a
     debugging session into a one-line check."""
+    # Jarvis {version} is stamped FIRST and unconditionally. Its absence means the
+    # overlay itself was never restarted — reloading the extension does nothing for
+    # the Python side, and "I reloaded and nothing changed" turned out to mean exactly
+    # that. With this, one glance separates "old overlay" from "old content script".
+    app = f"Jarvis {_APP_VERSION}"
     frames = res.get("frameVersions") or []
     stale = [f for f in frames if f.get("csVersion") is None]
     if stale and frames:
         which = ", ".join(str(f.get("frameId")) for f in stale)
-        return (f" [STALE CONTENT SCRIPT in frame(s) {which} — they predate this build, "
-                "so their fields come from OLD code. Reload the extension at "
+        return (f" [{app}; STALE CONTENT SCRIPT in frame(s) {which} — they predate this "
+                "build, so their fields come from OLD code. Reload the extension at "
                 "chrome://extensions, then reload the page, before trusting this]")
     ver = res.get("csVersion")
     if ver is None:
-        return (" [content script version UNKNOWN — the page is running a script older "
-                "than this build: reload the extension, then reload the page]")
+        return (f" [{app}; content script version UNKNOWN — the page is running a script "
+                "older than this build: reload the extension, then reload the page]")
     if len(frames) > 1:
-        return f" [content script v{ver}, {len(frames)} frames]"
-    return f" [content script v{ver}]"
+        return f" [{app}; content script v{ver}, {len(frames)} frames]"
+    return f" [{app}; content script v{ver}]"
 
 
 def _fmt_fields(fields):
@@ -101,6 +112,15 @@ def _fmt_fields(fields):
                     texts.append(t)
             if texts:
                 d["options"] = texts
+        # The scanner found the options but could not read their labels. Say that
+        # plainly: the ids it fell back on are meaningless, and proposing one would
+        # write an arbitrary choice into a real application.
+        if d.pop("optionsUnreadable", False):
+            d["OPTIONS_UNREADABLE"] = (
+                "the visible text of these options could not be read from the page, so "
+                "the values above are internal ids, NOT the choices the user sees. Do "
+                "not propose one. Ask the user to read the options out, or run "
+                "browser_probe_options to find out why the labels are missing.")
         if d.get("labelSource") in (None, "none") or not d.get("label"):
             d["UNLABELLED"] = "ask the user what this field is — do not guess"
         elif d.get("labelSource") == "nearby-text":
