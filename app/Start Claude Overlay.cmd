@@ -83,7 +83,7 @@ exit /b
 
 :nopython
 echo ============================================================
-echo   [X] Could not start Claude Overlay: no Python would run.
+echo   [X] Could not start Jarvis: no Python would run.
 echo ============================================================
 echo.
 echo   What this machine actually has ^(please send this^):

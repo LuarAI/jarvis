@@ -121,7 +121,7 @@ except Exception as _e:
     _report_import_failure(_e)
 
 # ───────────────────────────── the overlay UI ─────────────────────────────
-PLACEHOLDER = "Reply to Claude…"
+PLACEHOLDER = "Reply to Jarvis…"
 TOOL_ICONS = {
     "Read": "▤", "Write": "✎", "Edit": "✎", "MultiEdit": "✎", "NotebookEdit": "✎",
     "Bash": "❯", "BashOutput": "❯", "KillShell": "❯", "PowerShell": "❯",
@@ -508,7 +508,7 @@ class Overlay:
     # ── construction ──
     def _build(self):
         self.root = tk.Tk()
-        self.root.title("Claude")
+        self.root.title("Jarvis")
         self.s = max(1.0, self.root.winfo_fpixels("1i") / 96.0)   # DPI scale factor
         self.root.overrideredirect(True)
         self._apply_app_icon()                 # Clawd icon for the taskbar button / alt-tab
@@ -942,7 +942,7 @@ class Overlay:
         self._bind_drag(mark)
         # The title doubles as the rename target: click it (without dragging) to edit this
         # overlay's name; dragging it still moves the window (moved-detection, like the orb).
-        self.title_lbl = tk.Label(bar, text=self.overlay_name or "Claude", bg=T["bg"],
+        self.title_lbl = tk.Label(bar, text=self.overlay_name or "Jarvis", bg=T["bg"],
                                   fg=T["text"], font=self.f_title, cursor="hand2")
         self.title_lbl.pack(side="left")
         self.title_lbl.bind("<ButtonPress-1>", self._title_press)
@@ -1038,7 +1038,7 @@ class Overlay:
 
     def _apply_name(self, name):
         self.overlay_name = name or ""
-        shown = self.overlay_name or "Claude"
+        shown = self.overlay_name or "Jarvis"
         try:
             self.title_lbl.configure(text=shown)
         except Exception:
@@ -3546,7 +3546,7 @@ class Overlay:
             # insert) so _prune_chat can tell if a later trim removed the active header.
             self.chat.mark_set("ah_start", "end-1c")
             self.chat.mark_gravity("ah_start", "left")
-            self._ins("\n✦ Claude\n", "ah")
+            self._ins("\n✦ Jarvis\n", "ah")
             try:
                 self.chat.tag_remove("current_ah", "1.0", "end")
                 self.chat.tag_add("current_ah", "ah_start", "end-1c")

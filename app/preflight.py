@@ -295,7 +295,7 @@ def run(deep=True):
     `ok` is False if any FAIL was found OR (when deep) the app didn't actually load:
     the import test is the only one that can catch a break nothing here thought to
     look for, so it must be able to fail the run."""
-    lines = ["", "=" * 72, " Claude Overlay - environment report", "=" * 72]
+    lines = ["", "=" * 72, " Jarvis - environment report", "=" * 72]
     lines += environment_block()
     lines += [f"install dir  : {repo_dir()}"]
 

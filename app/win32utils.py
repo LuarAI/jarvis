@@ -214,7 +214,7 @@ def _pythonw_exe():
     return exe
 
 
-def ensure_taskbar_shortcut(script_path, app_id=APP_ID, icon=APP_ICON, name="Claude Overlay"):
+def ensure_taskbar_shortcut(script_path, app_id=APP_ID, icon=APP_ICON, name="Jarvis"):
     """Self-heal the Start Menu shortcut Windows needs to pin the overlay to the taskbar
     like a normal app. The overlay is a frameless pythonw window that declares an explicit
     AppUserModelID; Windows will only back a taskbar PIN with a Start Menu .lnk whose

@@ -250,11 +250,12 @@ def test_apply_name_updates_title_label(overlay):
 
 
 def test_apply_name_empty_restores_default(overlay):
-    """_apply_name('') resets overlay_name to '' and title falls back to 'Claude'."""
+    """_apply_name('') resets overlay_name to '' and the title falls back to the
+    app's own name."""
     overlay._apply_name("Winbond FPM")
     overlay._apply_name("")
     assert overlay.overlay_name == ""
-    assert overlay.title_lbl.cget("text") == "Claude"
+    assert overlay.title_lbl.cget("text") == "Jarvis"
 
 
 def test_cancel_rename_leaves_name_unchanged(overlay):
@@ -363,3 +364,31 @@ def test_ensure_on_screen_relocates_stranded_window(overlay, monkeypatch):
         assert 5000 <= nx <= 7000 and 5000 <= ny <= 6960
     finally:
         overlay.root.geometry(before)            # don't leave the shared window off-screen
+
+
+# ─── app identity ────────────────────────────────────────────────────────────
+
+def test_the_app_identifies_as_jarvis():
+    """The overlay is seeded from claude-overlay, and shipped for a while carrying
+    that project's name, icon and AppUserModelID — so Windows grouped it under
+    someone else's app and the taskbar showed their icon."""
+    import os
+    import config
+    assert config.APP_ICON == "jarvis.ico"
+    assert not config.APP_ID.startswith("shengyanlin"), "still the seed author's app id"
+    assert "Jarvis" in config.APP_ID
+    here = os.path.dirname(os.path.abspath(config.__file__))
+    assert os.path.exists(os.path.join(here, config.APP_ICON)), "icon file is missing"
+
+
+def test_the_titlebar_falls_back_to_jarvis(overlay):
+    """The OS window title is set once at startup and a rename overwrites it, so
+    assert the fallback the titlebar actually renders rather than root.title(),
+    which an earlier renaming test leaves changed."""
+    overlay._apply_name("")
+    assert overlay.title_lbl.cget("text") == "Jarvis"
+
+
+def test_the_composer_placeholder_names_jarvis():
+    import claude_overlay as co
+    assert "Jarvis" in co.PLACEHOLDER

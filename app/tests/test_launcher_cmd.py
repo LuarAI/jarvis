@@ -521,7 +521,7 @@ def test_the_app_execution_alias_stub_is_still_refused(tmp_path):
         tmp_path, os.path.join("Microsoft", "WindowsApps"), "@exit /b 9009\n")
     rc, out = _run(app, env, tmp_path)
     assert not _wait_for(marker, seconds=3), "launched the alias stub"
-    assert "Could not start Claude Overlay" in out
+    assert "Could not start Jarvis" in out
     assert "WindowsApps" in out, (
         "the failure message must show what it actually found, not just that it failed\n"
         f"--- output ---\n{out}")
@@ -532,7 +532,7 @@ def test_no_python_at_all_reports_what_it_looked_at(tmp_path):
     app, marker, env = _pythonless(tmp_path)
     rc, out = _run(app, env, tmp_path)
     assert not _wait_for(marker, seconds=3)
-    assert "Could not start Claude Overlay" in out
+    assert "Could not start Jarvis" in out
     assert "(nothing found)" in out, f"give-up path printed no evidence\n{out}"
     # "No Python on PATH" and "no Python on this PC" need different fixes, and the report
     # is the only thing that separates them for whoever is reading it.

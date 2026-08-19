@@ -1,4 +1,4 @@
-# Create (or refresh) a Start Menu .lnk for Claude Overlay that carries an explicit
+# Create (or refresh) a Start Menu .lnk for Jarvis that carries an explicit
 # System.AppUserModel.ID matching the id the app declares at runtime via
 # SetCurrentProcessExplicitAppUserModelID (config.APP_ID).
 #

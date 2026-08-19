@@ -1,5 +1,5 @@
 @echo off
-rem Print one readable report explaining why Claude Overlay won't start, and put a copy
+rem Print one readable report explaining why Jarvis won't start, and put a copy
 rem on the clipboard so it can be pasted straight into a message.
 rem
 rem This exists because the overlay runs under pythonw, which has no console: when it
@@ -8,7 +8,7 @@ cd /d "%~dp0"
 setlocal enabledelayedexpansion
 
 echo ============================================================
-echo   Claude Overlay - diagnose
+echo   Jarvis - diagnose
 echo ============================================================
 echo.
 

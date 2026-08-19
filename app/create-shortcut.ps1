@@ -1,4 +1,4 @@
-# Creates a "Claude Overlay" shortcut on the current user's Desktop, pointing to
+# Creates a "Jarvis" shortcut on the current user's Desktop, pointing to
 # this folder's launcher, with the Clawd orb icon. Portable: derives paths from its own
 # location, so it works wherever you cloned the repo.
 param([string]$Dir = $PSScriptRoot)
@@ -16,7 +16,7 @@ if (-not (Test-Path $launcher)) {
 }
 
 $desktop = [Environment]::GetFolderPath('Desktop')
-$lnk = Join-Path $desktop 'Claude Overlay.lnk'
+$lnk = Join-Path $desktop 'Jarvis.lnk'
 $icon = Join-Path $Dir 'claude_overlay_2.ico'
 
 $ws = New-Object -ComObject WScript.Shell
@@ -25,8 +25,8 @@ $sc.TargetPath = $launcher
 $sc.WorkingDirectory = $Dir
 if (Test-Path $icon) { $sc.IconLocation = "$icon,0" }
 $sc.WindowStyle = 7   # minimized: the launcher window only flashes briefly
-$sc.Description = 'Claude Overlay - screen-aware floating Claude Code chat'
+$sc.Description = 'Jarvis - screen-aware floating AI assistant'
 $sc.Save()
 
-Write-Host "Created 'Claude Overlay' shortcut on your Desktop." -ForegroundColor Green
+Write-Host "Created 'Jarvis' shortcut on your Desktop." -ForegroundColor Green
 Write-Host "  -> $launcher"

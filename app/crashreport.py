@@ -35,7 +35,7 @@ import sys
 import time
 import traceback
 
-APP_NAME = "Claude Overlay"
+APP_NAME = "Jarvis"
 _MAX_LOG_BYTES = 512 * 1024        # rotate at ~0.5MB; a crash log is append-mostly and tiny
 _LOG_NAME = "crash.log"
 _installed = False

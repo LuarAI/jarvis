@@ -162,9 +162,9 @@ TASKBAR_BUTTON = True            # show a real, clickable Windows taskbar button
                                  # (overrideredirect) window gets NO taskbar button by default;
                                  # this forces one via WS_EX_APPWINDOW. False → the pure
                                  # no-taskbar floating overlay (original behaviour).
-APP_ICON = "claude_overlay_2.ico"  # window + taskbar icon (Clawd). Path is relative to this
+APP_ICON = "jarvis.ico"  # window + taskbar icon (Clawd). Path is relative to this
                                  # script (or absolute). "" → no custom icon (Tk default).
-APP_ID = "shengyanlin.claude-overlay"  # explicit Windows AppUserModelID. Without it a pythonw
+APP_ID = "LuarAI.Jarvis"  # explicit Windows AppUserModelID. Without it a pythonw
                                  # app shows pythonw's icon in the taskbar and groups with other
                                  # Python apps; setting it makes the taskbar use APP_ICON instead.
 ORB_SIZE = 56                    # diameter (logical px) of the collapsed Claude orb
