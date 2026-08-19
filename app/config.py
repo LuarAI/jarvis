@@ -168,7 +168,7 @@ APP_ID = "LuarAI.Jarvis"  # explicit Windows AppUserModelID. Without it a python
                                  # app shows pythonw's icon in the taskbar and groups with other
                                  # Python apps; setting it makes the taskbar use APP_ICON instead.
 ORB_SIZE = 56                    # diameter (logical px) of the collapsed Claude orb
-ORB_IMAGE = "claude_overlay_2.png"  # collapsed-orb artwork. "" → procedural glossy
+ORB_IMAGE = "jarvis_orb.png"  # collapsed-orb artwork. "" → procedural glossy
                                  # terracotta sphere (original look). A path (relative
                                  # to this script, or absolute) to a PNG/ICO renders that
                                  # image instead: it's auto-scaled + centred so the whole
@@ -362,20 +362,29 @@ SYSTEM_APPEND = (
     "on the file is far faster than COM — but only when the file is NOT open in Office."
 )
 
+# Palette drawn from the Jarvis mark itself — periwinkle/violet iridescence with a
+# warm cream counterweight (the bow tie), sampled from the artwork rather than
+# guessed: #4063CE is the most saturated blue in it, #E3D0C5 the cream. The neutrals
+# are cool greys biased toward that blue, so they read as chosen rather than
+# inherited. It replaces Anthropic's terracotta, which belonged to the seed project.
+#
+# Contrast is checked, not eyeballed: text ≥14:1 on its ground in both themes and
+# accents ≥5:1, so the accent is safe for small labels and not only for fills.
+# "faint" is deliberately low — it is decorative, never load-bearing text.
 THEMES = {
     "light": {
-        "bg": "#FAF9F5", "field": "#FFFFFF", "user_card": "#EFEBE1",
-        "text": "#28261F", "muted": "#73706A", "faint": "#A9A59B",
-        "accent": "#D97757", "accent_hi": "#C25E40", "on_accent": "#FFFFFF",
-        "border": "#E6E2D8", "tool_bg": "#F2EFE7", "err": "#B4413A",
-        "sel": "#EADDD3", "hover": "#EFEBE1",
+        "bg": "#F7F8FC", "field": "#FFFFFF", "user_card": "#ECEEF8",
+        "text": "#1B1D2B", "muted": "#63667A", "faint": "#9A9DB0",
+        "accent": "#4A5FC1", "accent_hi": "#3B4EA8", "on_accent": "#FFFFFF",
+        "border": "#DFE3F0", "tool_bg": "#EFF1F9", "err": "#C0453F",
+        "sel": "#D9DFF7", "hover": "#E8EBF7",
     },
     "dark": {
-        "bg": "#262624", "field": "#1F1E1D", "user_card": "#34332F",
-        "text": "#ECEAE3", "muted": "#9B978D", "faint": "#6F6C64",
-        "accent": "#D97757", "accent_hi": "#E68A6C", "on_accent": "#FFFFFF",
-        "border": "#3A3934", "tool_bg": "#2E2D2A", "err": "#E0897D",
-        "sel": "#3A3934", "hover": "#30302E",
+        "bg": "#1A1B26", "field": "#15161F", "user_card": "#252739",
+        "text": "#E8E9F2", "muted": "#9A9DB0", "faint": "#6B6E82",
+        "accent": "#8B9BE8", "accent_hi": "#A6B3F0", "on_accent": "#15161F",
+        "border": "#2E3042", "tool_bg": "#212232", "err": "#E88B85",
+        "sel": "#31344A", "hover": "#232536",
     },
 }
 
