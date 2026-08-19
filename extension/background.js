@@ -276,8 +276,11 @@ async function askFrames(tabId, msg) {
   }
   const known = versions.map((v) => v.csVersion).filter((v) => v !== null);
   const csVersion = known.length === versions.length ? Math.min.apply(null, known) : null;
+  // If ANY frame was still rendering, the merged list is incomplete — the warning
+  // has to survive the merge or it never reaches the caller that acts on it.
+  const unsettled = live.some(({ r }) => r && r.unsettled);
   return { fields, page_text, url, title, ats, excluded_counts: excluded,
-           csVersion, frameVersions: versions };
+           csVersion, frameVersions: versions, unsettled };
 }
 
 /* Which tab does Jarvis act on?

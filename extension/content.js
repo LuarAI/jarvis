@@ -27,7 +27,7 @@
   }
   // Bumped whenever this file changes: every reply carries it, so "the page is running
   // an old script" is visible in the answer instead of being inferred from a weird error.
-  const JARVIS_CS_VERSION = 14;
+  const JARVIS_CS_VERSION = 15;
 
   const FIELDS = new Map();          // ref -> element (rebuilt on each scan)
   const FIELD_FP = new Map();        // ref -> fingerprint, re-checked before writing
@@ -448,8 +448,39 @@
   }
 
   function scanFields() {
-    FIELDS.clear();
-    refSeq = 0;
+    /* Refs must survive a re-scan.
+     *
+     * This used to clear FIELDS and reset refSeq, so a second scan reassigned
+     * f1..fN to different elements AND overwrote their fingerprints. A ref captured
+     * from an earlier read then resolved to a DIFFERENT field whose fingerprint
+     * matched — so the guard meant to catch exactly this agreed, and a cover letter
+     * was written into First Name on a live application while reporting success.
+     *
+     * Now a ref is a durable handle: the same element keeps the same ref across
+     * scans, and refs from a previous scan stay resolvable so a stale one either
+     * still finds its own field or fails loudly. Elements that have left the
+     * document are dropped, so the maps can't grow without bound. */
+    for (const [ref, held] of Array.from(FIELDS.entries())) {
+      const alive = Array.isArray(held)
+        ? held.some((n) => n && n.isConnected)
+        : !!(held && held.isConnected);
+      if (!alive) { FIELDS.delete(ref); FIELD_FP.delete(ref); }
+    }
+    const priorRef = new Map();          // element -> the ref it already owns
+    let maxSeq = 0;
+    for (const [ref, held] of FIELDS.entries()) {
+      if (Array.isArray(held)) {
+        // a group: any surviving member identifies the group's ref
+        for (const n of held) { if (n) priorRef.set(n, ref); }
+      } else {
+        priorRef.set(held, ref);
+      }
+      const m = /^f(\d+)$/.exec(String(ref));
+      if (m) maxSeq = Math.max(maxSeq, parseInt(m[1], 10));
+    }
+    // Never reissue a number a live ref already holds, or a new field would steal an
+    // existing field's ref — the very confusion this is here to prevent.
+    refSeq = maxSeq;
     const fields = [];
     const excluded = { credentials: 0, hidden_or_honeypot: 0 };
     const radioGroups = new Map();     // group key → {members, field}
@@ -512,7 +543,7 @@
         const key = (el.form ? "f" : "") + (el.name || groupLabel(el) || "radio");
         let g = radioGroups.get(key);
         if (!g) {
-          const ref = "f" + ++refSeq;
+          const ref = priorRef.get(el) || ("f" + ++refSeq);
           const question = groupLabel(el) || labelFor(el) || "";
           g = {
             members: [],
@@ -538,7 +569,9 @@
         if (el.checked) g.field.currentValue = text || "(selected)";
         continue;
       }
-      const ref = "f" + ++refSeq;
+      // Same element → same ref, so a ref handed out by an earlier scan still means
+      // this field and nothing else.
+      const ref = priorRef.get(el) || ("f" + ++refSeq);
       FIELDS.set(ref, el);
       const kind = kindOf(el);
       const lbl = labelFor(el);
@@ -2059,13 +2092,27 @@
                                           connected: !!(cards[0].el && cards[0].el.isConnected) }
                                       : null });
       } else if (msg.action === "list_fields") {
-        const scan = scanFields();
+        /* Scan TWICE and take the settled result.
+         *
+         * A JazzHR form returned 11 fields on one read and 19 on the next, with no
+         * navigation between them — the personal-information block had not rendered
+         * yet. Nothing said the first list was short, so the model proposed against
+         * it and the values went into the wrong boxes. A second scan a moment later
+         * costs milliseconds and turns "silently incomplete" into "settled, and if
+         * it still moved, said so". */
+        let scan = scanFields();
+        const firstCount = scan.fields.length;
+        scan = scanFields();
+        if (scan.fields.length !== firstCount) {
+          scan = scanFields();           // still moving: one more, then report it
+          scan.unsettled = (scan.fields.length !== firstCount);
+        }
         // csVersion travels WITH the fields. Without it there was no way to tell
         // whether a surprising payload came from this code or from an older script
         // still resident in the page — which cost several rounds of debugging a
         // version that turned out not to be the one running.
         respond({ ok: true, url: location.href, ats: atsOf(), isTop: window.top === window,
-                  csVersion: JARVIS_CS_VERSION,
+                  csVersion: JARVIS_CS_VERSION, unsettled: !!scan.unsettled,
                   fields: scan.fields, excluded_counts: scan.excluded_counts });
       } else if (msg.action === "enumerate_options") {
         /* Read a picker's real choices instead of guessing at them. Only the frame

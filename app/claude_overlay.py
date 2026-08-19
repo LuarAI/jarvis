@@ -1231,15 +1231,21 @@ class Overlay:
         self.in_h = self.px(62)
         self.canvas = tk.Canvas(wrap, bg=T["bg"], height=self.in_h, highlightthickness=0)
         self.canvas.pack(fill="x", padx=self.px(12), pady=self.px(2))
+        # undo=True turns on Tk's own undo stack (off by default, which is why Ctrl+Z
+        # did nothing and a paste couldn't be taken back). autoseparators groups typing
+        # into words rather than characters, so one Ctrl+Z undoes a word or a whole
+        # paste — what every other text box on the machine does.
         self.entry = tk.Text(self.canvas, bg=T["field"], fg=T["text"], bd=0, height=2,
                              wrap="word", font=self.f_body, insertbackground=T["accent"],
-                             highlightthickness=0, padx=0, pady=0)
+                             highlightthickness=0, padx=0, pady=0,
+                             undo=True, autoseparators=True, maxundo=200)
         self.entry_win = self.canvas.create_window(0, 0, window=self.entry, anchor="nw")
         self.entry.bind("<Return>", self._on_return)
         self.entry.bind("<KP_Enter>", self._on_return)
         self.entry.bind("<Control-v>", self._on_paste)
         self.entry.bind("<Control-V>", self._on_paste)
         self.entry.bind("<Shift-Insert>", self._on_paste)
+        self._install_edit_shortcuts(self.entry)
         self.entry.bind("<FocusIn>", self._ph_out)
         self.entry.bind("<FocusOut>", self._ph_in)
         self.entry.bind("<Key>", self._ph_key, add="+")   # typing clears the hint too
@@ -2899,6 +2905,52 @@ class Overlay:
         except Exception:
             return False
 
+    def _install_edit_shortcuts(self, widget):
+        """The editing shortcuts every other text box on Windows has.
+
+        Tk ships Ctrl+Z but no redo binding on Windows, no Ctrl+A (its Ctrl+/ is the
+        select-all nobody knows), and no Ctrl+Backspace. Their absence is only
+        noticeable when you reach for one and nothing happens — which is exactly what
+        made a pasted block impossible to take back."""
+        def undo(_e=None):
+            try:
+                widget.edit_undo()
+            except Exception:
+                pass                    # nothing left on the stack — not an error
+            return "break"
+
+        def redo(_e=None):
+            try:
+                widget.edit_redo()
+            except Exception:
+                pass
+            return "break"
+
+        def select_all(_e=None):
+            widget.tag_add("sel", "1.0", "end-1c")
+            widget.mark_set("insert", "end-1c")
+            return "break"
+
+        def delete_word(_e=None):
+            """Ctrl+Backspace: delete the word before the cursor."""
+            try:
+                if widget.tag_ranges("sel"):
+                    widget.delete("sel.first", "sel.last")
+                else:
+                    widget.delete("insert-1c wordstart", "insert")
+            except Exception:
+                pass
+            return "break"
+
+        for seq in ("<Control-z>", "<Control-Z>"):
+            widget.bind(seq, undo)
+        for seq in ("<Control-y>", "<Control-Y>",
+                    "<Control-Shift-z>", "<Control-Shift-Z>"):
+            widget.bind(seq, redo)
+        for seq in ("<Control-a>", "<Control-A>"):
+            widget.bind(seq, select_all)
+        widget.bind("<Control-BackSpace>", delete_word)
+
     def _on_paste(self, e):
         """Ctrl+V: if the clipboard holds an image (or image files), attach it. Everything
         slow — the grabclipboard() OLE read AND the decode/downscale/save — runs on a
@@ -3706,11 +3758,73 @@ class Overlay:
         self._md_render_inline(line, ("a",))             # plain paragraph line
         self._raw_ins(nl, "a")
 
+    # A markdown link, or a bare URL. Trailing punctuation is excluded so a sentence
+    # ending "see https://x.com." doesn't put the full stop inside the link.
+    _LINK_RE = re.compile(
+        r'\[([^\]\n]+)\]\((https?://[^\s)]+)\)'          # [text](url)
+        r'|(?<![\w/])((?:https?://|www\.)[^\s<>"\']+[^\s<>"\'.,;:!?)\]])')
+
     def _md_render_inline(self, text, base):
+        """Render one line's inline spans, turning links into clickable text.
+
+        Links used to arrive as plain text, so a URL Claude gave you had to be
+        selected and copied by hand. Each one now gets its own tag carrying the real
+        target, styled like a link and opened in the browser on click."""
         for seg, kind in self._md_inline_segments(text):
             if not seg:
                 continue
-            self._raw_ins(seg, *(base + ((self.MD_INLINE[kind],) if kind else ())))
+            tags = base + ((self.MD_INLINE[kind],) if kind else ())
+            if kind == "code":                      # a URL inside `backticks` is code
+                self._raw_ins(seg, *tags)
+                continue
+            pos = 0
+            for m in self._LINK_RE.finditer(seg):
+                if m.start() > pos:
+                    self._raw_ins(seg[pos:m.start()], *tags)
+                label = m.group(1) or m.group(3)
+                url = m.group(2) or m.group(3)
+                if url.startswith("www."):
+                    url = "https://" + url
+                self._insert_link(label, url, tags)
+                pos = m.end()
+            self._raw_ins(seg[pos:], *tags)
+
+    def _insert_link(self, label, url, tags):
+        """Insert `label` as a clickable link to `url`.
+
+        One tag PER link (link-0, link-1, …) because a Tk tag binding can't know which
+        occurrence was clicked — a shared tag would open whichever URL was bound last.
+        The tag is remembered on the widget so _prune_chat's deletions don't leave the
+        binding behind."""
+        idx = getattr(self, "_link_seq", 0)
+        self._link_seq = idx + 1
+        tag = f"link-{idx}"
+        self.chat.tag_configure(tag, foreground=T["accent"], underline=True)
+        self.chat.tag_bind(tag, "<Button-1>", lambda e, u=url: self._open_link(u))
+        self.chat.tag_bind(tag, "<Enter>",
+                           lambda e: self.chat.configure(cursor="hand2"))
+        self.chat.tag_bind(tag, "<Leave>",
+                           lambda e: self.chat.configure(cursor=""))
+        self._raw_ins(label, *(tags + (tag,)))
+        # keep the selection above links, or highlighting one shows nothing
+        try:
+            self.chat.tag_raise("sel")
+        except Exception:
+            pass
+
+    def _open_link(self, url):
+        """Open a link in the default browser.
+
+        Only http(s): a page can put any string in front of the model, and file:// or
+        a custom scheme would let a crafted reply launch something local."""
+        try:
+            if not re.match(r'^https?://', url, re.I):
+                self.add_err(f"Refusing to open a non-web link: {url[:80]}")
+                return
+            import webbrowser
+            webbrowser.open(url)
+        except Exception as e:
+            self.add_err(f"Couldn't open the link: {e}")
 
     @staticmethod
     def _md_inline_segments(text):

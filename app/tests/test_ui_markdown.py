@@ -281,3 +281,94 @@ def test_add_think_label_text(overlay):
     txt = chat_text(overlay)
     assert "thinking" in txt
     assert "step by step" in txt
+
+
+# ─── links ───────────────────────────────────────────────────────────────────
+
+def _link_tags(ov):
+    return [t for t in ov.chat.tag_names() if str(t).startswith("link-")]
+
+
+def test_markdown_link_is_clickable(overlay):
+    """Links arrived as plain text, so a URL had to be selected and copied by hand."""
+    overlay.add_delta("see [the repo](https://github.com/LuarAI/jarvis) for details")
+    overlay._md_finalize()
+    txt = chat_text(overlay)
+    assert "the repo" in txt
+    assert "https://github.com" not in txt, "the raw URL should not be shown"
+    assert "](" not in txt, "markdown syntax leaked into the transcript"
+    assert _link_tags(overlay), "no clickable link tag was created"
+
+
+def test_bare_url_is_clickable(overlay):
+    overlay.add_delta("docs at https://example.com/page and more text")
+    overlay._md_finalize()
+    assert _link_tags(overlay)
+    assert "https://example.com/page" in chat_text(overlay)
+
+
+def test_trailing_punctuation_is_not_part_of_the_link(overlay):
+    overlay.add_delta("go to https://example.com.")
+    overlay._md_finalize()
+    assert chat_text(overlay).rstrip().endswith(".")
+
+
+def test_two_links_keep_separate_targets(overlay):
+    """One tag per link: a shared tag would open whichever URL was bound last."""
+    overlay.add_delta("[a](https://one.example) and [b](https://two.example)")
+    overlay._md_finalize()
+    assert len(_link_tags(overlay)) >= 2
+
+
+def test_a_url_in_backticks_stays_code(overlay):
+    overlay.add_delta("run `curl https://example.com` now")
+    overlay._md_finalize()
+    assert "https://example.com" in chat_text(overlay)
+    assert _tag_present(overlay, "md_code")
+
+
+def test_only_web_links_are_opened(overlay):
+    """A page can put any string in front of the model; file:// must not launch."""
+    opened = []
+    import webbrowser
+    real = webbrowser.open
+    webbrowser.open = lambda u: opened.append(u)
+    try:
+        overlay._open_link("file:///C:/Windows/System32/calc.exe")
+        assert opened == [], "a non-web scheme was opened"
+        overlay._open_link("https://example.com")
+        assert opened == ["https://example.com"]
+    finally:
+        webbrowser.open = real
+
+
+# ─── editing shortcuts in the composer ───────────────────────────────────────
+
+def test_ctrl_z_undoes_a_paste(overlay):
+    """Tk's undo stack is OFF by default, which is why Ctrl+Z did nothing."""
+    overlay.entry.delete("1.0", "end")
+    overlay.entry.edit_reset()
+    overlay.entry.insert("end", "keep this")
+    overlay.entry.edit_separator()
+    overlay.entry.insert("end", " AND A PASTED BLOCK")
+    assert "PASTED" in overlay.entry.get("1.0", "end")
+    overlay.entry.edit_undo()
+    assert "PASTED" not in overlay.entry.get("1.0", "end")
+    assert "keep this" in overlay.entry.get("1.0", "end")
+
+
+def test_redo_after_undo(overlay):
+    overlay.entry.delete("1.0", "end")
+    overlay.entry.edit_reset()
+    overlay.entry.insert("end", "first")
+    overlay.entry.edit_separator()
+    overlay.entry.insert("end", " second")
+    overlay.entry.edit_undo()
+    overlay.entry.edit_redo()
+    assert "second" in overlay.entry.get("1.0", "end")
+
+
+def test_undo_on_an_empty_stack_does_not_raise(overlay):
+    overlay.entry.delete("1.0", "end")
+    overlay.entry.edit_reset()
+    overlay.entry.event_generate("<Control-z>")      # must not raise

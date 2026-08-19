@@ -200,9 +200,19 @@ def build_tools(bridge, propose_fill):
         # keeps one alive across navigations), and there was previously no way to tell
         # the two apart — which cost several rounds of debugging code that wasn't the
         # code running.
+        # A form still rendering reports fewer fields than it has, and proposing
+        # against a short list is exactly how values landed in the wrong boxes on a
+        # live application: refs are positional, so a later, longer read shifts every
+        # one of them. Say the list may be incomplete rather than presenting it as
+        # settled.
+        warn = ("\n\nWARNING: the field list was STILL CHANGING as it was read, so it "
+                "may be incomplete. Call browser_list_fields again and use the newer "
+                "list before proposing anything."
+                if res.get("unsettled") else "")
         return {"content": [{"type": "text",
                              "text": f"{len(fields)} fillable field(s)"
-                                     f"{_version_stamp(res)}:\n{_fmt_fields(fields)}"}]}
+                                     f"{_version_stamp(res)}:\n{_fmt_fields(fields)}"
+                                     f"{warn}"}]}
 
     @tool("browser_enumerate_options",
           "Read the REAL choices a dropdown offers, without selecting anything. Use "
