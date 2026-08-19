@@ -81,3 +81,42 @@ A read-only spike, no UI changes: a small `codex_client.py` that starts the
 app-server, does `initialize`, `thread/start`, `turn/start`, and prints streamed
 deltas to stdout. That answers "can Jarvis drive a whole turn" for a fraction of the
 cost of wiring it into the overlay, and it is throwaway if the answer is no.
+
+## Spike result (2026-08-19) — a full turn was driven end to end
+
+`spikes/codex_turn.py` is a ~200-line client that does the whole loop. Verified:
+
+    python spikes/codex_turn.py             -> initialize, thread, streamed answer
+    python spikes/codex_turn.py --approve   -> approval asked AND answered
+    python spikes/codex_turn.py --interrupt -> generation cut mid-sentence
+
+The streamed reply to "what are you?" came back as *"I'm Jarvis, your floating
+desktop AI assistant"* — so `baseInstructions` really does carry Jarvis's system
+prompt, rather than being advisory.
+
+The approval run received `item/commandExecution/requestApproval` as a
+server-initiated JSON-RPC request, answered `{"decision": "accept"}`, and the turn
+then completed with the command's real output. That is the same contract
+`can_use_tool` provides today, so the approval card maps across directly.
+
+### Things only running it revealed
+
+* **The npm install ships two shims.** `shutil.which("codex")` finds the
+  extensionless shell script first, and CreateProcess rejects it with "not a valid
+  Win32 application". Prefer `codex.cmd` explicitly on Windows.
+* **The default sandbox is `read-only`,** under which a shell command FAILS rather
+  than prompting (Windows error 267). An approval test against the default never
+  sees an approval at all. `sandbox: "workspace-write"` is what makes the server ask.
+* **`turn/interrupt` needs `turnId`, not just `threadId`** — and `turn/start` returns
+  `{"turn": {...}}`, so the id is nested, not top-level. Getting this wrong fails
+  only later, at interrupt time.
+* **Approval policy belongs on `thread/start`,** not only on `turn/start`.
+
+### Still unproven
+
+* Tool calling: Jarvis's browser tools are an in-process MCP server today. Codex
+  would need them exposed as a real MCP server (`codex mcp`). Not attempted.
+* Token/context accounting for the status bar
+  (`account/rateLimits/updated` looks like the source, unverified).
+* Behaviour across a Codex upgrade — `app-server` is experimental, so regenerate the
+  schema and diff after each update.
